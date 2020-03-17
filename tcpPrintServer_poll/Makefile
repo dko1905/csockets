@@ -2,7 +2,8 @@ CC=gcc
 CFLAGS=-Wall -Werror -std=c11
 
 all: socketloop.o main.o clienthandle.o
-	$(CC) $(shell find . -name "*.o") -o aout $(CFLAGS)
+	mkdir -p build/
+	$(CC) $(shell find . -name "*.o") -o build/aout $(CFLAGS)
 socketloop.o: 
 	$(CC) -c src/socketloop.c $(CFLAGS)
 main.o:
