@@ -1,11 +1,14 @@
-cc=gcc
-cflags=-Wall -Werror -std=c11
-# Please find good c version.
-aout: main.o
-	mkdir -p build
-	$(cc) main.o -o build/aout $(cflags)
+CC=gcc
+CFLAGS=-Wall -Werror -std=c11
 
-main.o: src/main.c
-	$(cc) -c src/main.c $(cflags)
+all: socketloop.o main.o clienthandle.o
+	$(CC) $(shell find . -name "*.o") -o aout $(CFLAGS)
+socketloop.o: 
+	$(CC) -c src/socketloop.c $(CFLAGS)
+main.o:
+	$(CC) -c src/main.c $(CFLAGS)
+clienthandle.o:
+	$(CC) -c src/clienthandle.c $(CFLAGS)
+
 clean:
 	rm -rf *.o build/*
