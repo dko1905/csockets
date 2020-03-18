@@ -31,7 +31,13 @@ void socketloop(uint16_t port, int timeout, int verbose){
 			exit(2);
 		}
 		else if(pollr == 0){//* Check for timeout
-			printf("Timeout\n");
+			printf("Timeout, kicking all connected clients\n");
+			for(int n = 1; n < POLLMAX; n++){
+				struct pollfd *cfd = &fds[n];// Get current fd
+				if(cfd->fd != -1 && cfd->revents != POLLERR){
+					close(cfd->fd);
+				}
+			}
 		}
 		else{
 			

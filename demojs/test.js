@@ -10,10 +10,7 @@ function sleep(ms) {
 
 client.connect(port, "0.0.0.0", ()=>{
 	console.log("connected");
-	let n = 0;
-	setInterval(()=>{
-		client.write('Hello '+n+' ');
-		//console.log('sent');
-		n++;
-	}, 1000);
+});
+client.on('data', (chunk)=>{
+	console.log(chunk.toString("utf8"));	
 });

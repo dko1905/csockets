@@ -1,4 +1,5 @@
 #include "socketloop.h"
+#include "log.h"
 
 #include <sys/socket.h> // For socket functions
 #include <poll.h> // For POLLERR
@@ -10,10 +11,17 @@ void clienthandle(struct pollfd *fds, int verbose){
 	char buffer[11];
 	int bytesRead=0; 
 	if((bytesRead = read(fds->fd, buffer, 10)) <= 0){
+		if(verbose)
+			LOG("Failed to read() in clienthandle\n");
 		fds->revents = POLLERR; //* Needs to be over 'check for errors'
 	}
-	if(bytesRead > 0)	{
+	else{
 		buffer[bytesRead] = '\0';
-		printf("%s\n", buffer);
+		if(write(fds->fd, buffer, bytesRead) <= 0){
+			if(verbose)
+				LOG("Failed to write() in clienthandle");			
+		}
+		if(verbose)
+			LOG("Wrote packet back\n");
 	}
 }
