@@ -9,3 +9,6 @@ all: udpmsg
 
 udpmsg: $(OBJ)
 	$(CC) $(CFLAGS) $(OBJ) -o udpmsg
+
+clean:
+	rm -f $(OBJ) udpmsg

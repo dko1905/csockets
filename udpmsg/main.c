@@ -1,4 +1,3 @@
-#include <asm-generic/errno.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,24 +13,46 @@
 #define MAX_ERROR_COUNT 3
 #define PORT 10020
 
-int server(struct sockaddr *listen_addr, socklen_t listen_addr_len);
+int parse_ip(const char *ip, struct sockaddr *addr);
+int server(int family, struct sockaddr *listen_addr, socklen_t listen_addr_len);
 int client(struct sockaddr *remote_addr);
 
 int main(int argc, char *argv[]) {
-	if (argc < 2) {
+	int ret = 0;
+
+	if (argc < 3) {
 		fprintf(stderr, "Not enough arguments!\n");
 		return EXIT_FAILURE;
 	}
 
 	if (strcmp("server", argv[1]) == 0) {
-		struct sockaddr_in6 address = {0};
-		uint8_t loopback[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+		struct sockaddr addr = {0};
+		socklen_t addr_len = 0;
+		int family = 0;
 
-		address.sin6_family = AF_INET6;
-		address.sin6_port = htons(PORT);
-		memcpy(address.sin6_addr.s6_addr, loopback, sizeof(loopback));
+		ret = parse_ip(argv[2], &addr);
+		if (ret == 0) {
+			struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
 
-		return server((struct sockaddr*)&address, sizeof(address));
+			addr4->sin_port = htons(PORT);
+			addr4->sin_family = AF_INET;
+
+			family = AF_INET;
+			addr_len = sizeof(*addr4);
+		} else if (ret == 1) {
+			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
+
+			addr6->sin6_port = htons(PORT);
+			addr6->sin6_family = AF_INET6;
+
+			family = AF_INET6;
+			addr_len = sizeof(*addr6);
+		} else {
+			perror("Failed to parse ip");
+			return EXIT_FAILURE;
+		}
+
+		return server(family, &addr, addr_len);
 	} else if (strcmp("client", argv[1]) == 0) {
 		fprintf(stderr, "Client yet implemented!\n");
 		return EXIT_FAILURE;
@@ -43,7 +64,36 @@ int main(int argc, char *argv[]) {
 	return EXIT_SUCCESS;
 }
 
-int server(struct sockaddr *listen_addr, socklen_t listen_addr_len) {
+/* Returns:
+ * -1 - invalid address
+ *  0 - ipv4 address
+ *  1 - ipv6 address
+ */
+int parse_ip(const char *ip, struct sockaddr *addr) {
+	int ret = 0;
+	struct in_addr ipv4 = {0};
+	struct in6_addr ipv6 = {0};
+
+	ret = inet_pton(AF_INET, ip, &ipv4);
+	if (ret == 1) {
+		((struct sockaddr_in *)addr)->sin_addr = ipv4;
+		return 0;
+	} else if (ret == 0) {
+		/* Try next family */
+	} else {
+		return -1;
+	}
+
+	ret = inet_pton(AF_INET6, ip, &ipv6);
+	if (ret == 1) {
+		((struct sockaddr_in6 *)addr)->sin6_addr = ipv6;
+		return 1;
+	} else {
+		return -1;
+	}
+}
+
+int server(int family, struct sockaddr *listen_addr, socklen_t listen_addr_len) {
 	// server fd, general return value, error count (used to stop loops)
 	int servfd = 0, ret = 0, errcount = 0, status = EXIT_FAILURE;
 	ssize_t packet_len = 0;
@@ -57,7 +107,7 @@ int server(struct sockaddr *listen_addr, socklen_t listen_addr_len) {
 	char ipaddr[ipaddr_len] = {0};
 
 	/* Create socket fd. */
-	servfd = socket(AF_INET6, SOCK_DGRAM, 0);
+	servfd = socket(family, SOCK_DGRAM, 0);
 	if (servfd < 0) {
 		perror("Failed to create socket");
 		goto socket_err;
@@ -72,6 +122,7 @@ int server(struct sockaddr *listen_addr, socklen_t listen_addr_len) {
 
 	/* Accept packets. */
 	while (1) {
+		clientaddr_len = sizeof(clientaddr);
 		packet_len = recvfrom(servfd, buffer, buffer_size - 1, 0,
 				              &clientaddr, &clientaddr_len);
 
@@ -79,8 +130,10 @@ int server(struct sockaddr *listen_addr, socklen_t listen_addr_len) {
 		if (packet_len < 0) {
 			if (errno == ECONNREFUSED) {
 				++errcount;
+				fprintf(stderr,
+				        "Failed to receive: Connection refused (%d try): %s",
+				        errcount, strerror(errno));
 				if (errcount > 3) {
-					perror("Failed to receive: Connection refused");
 					goto recv_err;
 					break;
 				}
@@ -90,7 +143,7 @@ int server(struct sockaddr *listen_addr, socklen_t listen_addr_len) {
 			}
 		} else if (packet_len == 0) {
 			/* 0 len packet catch. */
-			printf("INFO: ha ha, received 0 byte dgram.\n");
+			printf("INFO: Received 0 byte dgram.\n");
 		} else {
 			/* Normal packet catch. */
 			if (clientaddr_len >= 28) {
@@ -126,3 +179,5 @@ int server(struct sockaddr *listen_addr, socklen_t listen_addr_len) {
 	socket_err:
 	return status;
 }
+
+
