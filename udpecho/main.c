@@ -10,7 +10,9 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -66,7 +68,7 @@ static thread_local char _ip_buffer[MAX(INET6_ADDRSTRLEN, INET_ADDRSTRLEN)] = {0
 static void *rw_loop_func(void *args);
 struct rw_loop_args {
 	int sfd;
-	bool run;
+	atomic_bool run;
 };
 
 int main(int argc, char *argv[])
@@ -82,6 +84,7 @@ int main(int argc, char *argv[])
 	size_t children_len = 0;
 	struct rw_loop_args children_args[MAX_BIND_COUNT] = {0};
 	size_t children_args_len = 0;
+	sigset_t sigset = {0};
 
 	/* Setup pthread mutex. */
 	ret = pthread_mutex_init(&log_mutex, NULL);
@@ -89,7 +92,25 @@ int main(int argc, char *argv[])
 		perr("Failed to create log_mutex: %s", strerror(errno));
 		goto mutex_err;
 	}
+	/* Setup sigset to catch SIGTERM. */
+	ret = sigemptyset(&sigset);
+	if (ret != 0) {
+		perr("Failed to setup sigset: %s", strerror(errno));
+		goto sigset_err;
+	}
+	ret = sigaddset(&sigset, SIGTERM);
+	ret = sigaddset(&sigset, SIGINT);
+	if (ret != 0) {
+		perr("Failed to add last signal to sigset: %s", strerror(errno));
+		goto sigset_err;
+	}
+	ret = sigprocmask(SIG_BLOCK, &sigset, NULL);
+	if (ret != 0) {
+		perr("Failed to set procmask: %s", strerror(errno));
+		goto sigset_err;
+	}
 
+	/* Set program name. */
 	progname = argv[0];
 	/* Parse args. argc variables:
 	 * 0: progname
@@ -192,13 +213,22 @@ int main(int argc, char *argv[])
 		children[children_len++] = thread;
 	}
 
-	sleep(40);
+	/* This "hack" forces the main thread to sleep until it unlocks.*/
+	ret = sigwait(&sigset, &ret);
+	if (ret != 0) {
+		pwarn("sigwait failed: %s", strerror(errno));
+	} else {
+		pdebug("sigwait: closing program nicely");
+	}
 	status = 0;
 
 thread_err:
+	/* Tell all thread to stop. */
+	for (size_t n = 0; n < children_len; ++n) {
+		atomic_store(&children_args[n].run, false);
+	}
 	/* Join all threads, and wait for them to stop. */
 	for (size_t n = 0; n < children_len; ++n) {
-		children_args[n].run = false;
 		ret = pthread_join(children[n], NULL);
 		if (ret != 0) {
 			perr("Error from pthread_join: %s", strerror(errno));
@@ -214,6 +244,7 @@ thread_err:
 socket_err:
 	freeaddrinfo(addr);
 addrinfo_err:
+sigset_err:
 	pthread_mutex_destroy(&log_mutex);
 mutex_err:
 args_err:
@@ -232,7 +263,7 @@ static void *rw_loop_func(void *args0)
 
 	pdebug("s%i: Started master loop", args->sfd);
 
-	while (args->run) {
+	while (atomic_load(&args->run) == true) {
 		/* Set correct size before calling. */
 		addr.ai_addrlen = sizeof(struct sockaddr_in6);
 		/* Reset ip to 0. */
