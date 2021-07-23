@@ -36,15 +36,22 @@
 #define MAX_RECV_TIMEOUT (5)
 /* The max size of datagram. */
 #define MAX_DATAGRAM_SIZE (2048)
+/* Max number of active users. */
+#define MAX_ACTIVE_USER_COUNT (2)
+/* Max size of message to send to all active users. */
+#define MAX_MSG_SIZE (120)
 
-/**/
+/* TODO: write comment for chat_user. */
 struct chat_user {
 	struct sockaddr_storage addr;
 	/* Messages sent in 60 second interval, NOT in the last 60 seconds. */
 	int messages_in60;
-	/* Messages sent in 10 second interval, NOT in the last 10 seconds. */
+	/* Messages sent in 5 second interval, NOT in the last 5 seconds. */
 	int messages_in5;
 };
+static struct chat_user active_users[MAX_ACTIVE_USER_COUNT] = {0};
+static size_t active_users_len = 0;
+static pthread_mutex_t active_users_mutex = {0};
 
 /* Mutex that is locked and unlocked when using logging functions. */
 static pthread_mutex_t log_mutex = {0};
@@ -99,6 +106,12 @@ int main(int argc, char *argv[])
 	ret = pthread_mutex_init(&log_mutex, NULL);
 	if (ret != 0) {
 		perr("Failed to create log_mutex: %s", strerror(errno));
+		goto mutex_err;
+	}
+	ret = pthread_mutex_init(&active_users_mutex, NULL);
+	if (ret != 0) {
+		perr("Failed to create active user mutex: %s", strerror(errno));
+		pthread_mutex_destroy(&log_mutex);
 		goto mutex_err;
 	}
 	/* Setup sigset to catch SIGTERM. */
@@ -254,6 +267,7 @@ socket_err:
 	freeaddrinfo(addr);
 addrinfo_err:
 sigset_err:
+	pthread_mutex_destroy(&active_users_mutex);
 	pthread_mutex_destroy(&log_mutex);
 mutex_err:
 args_err:
@@ -299,6 +313,14 @@ static void *rw_loop_func(void *args0)
 			bytes = ret;
 			pdebug("s%i: %s: %d bytes", args->sfd, addr2str(&addr),
 			    bytes);
+		}
+
+		/* TODO: throtale (I know it's spelled wrong). */
+
+		/* Send message to all active users. */
+		for (size_t n = 0; n < active_users_len; ++n) {
+			ret = sendto(args->sfd, buffer, 
+			    MIN((size_t)bytes, ), )
 		}
 
 		/* Send the message back. */
