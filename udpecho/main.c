@@ -1,3 +1,4 @@
+#include <asm-generic/errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 
@@ -7,141 +8,397 @@
 #include <errno.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <fcntl.h>
+#include <time.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
 
+#ifdef __STDC_NO_THREADS__
+#define thread_local __thread
+#else
+#include <threads.h>
+#endif
+
+/* Helper macros. */
 #define MAX(_a, _b) ((_a > _b) ? _a : _b)
+#define MIN(_a, _b) ((_a < _b) ? _a : _b)
 
-#define MAX_THERAD_COUNT 10
+/* Max amount of addresses to try binding to. This is used when traversing
+ * the addrinfo struct.
+ */
+#define MAX_BIND_COUNT (10)
+/* Setup read timeout to 5 seconds. */
+#define MAX_RECV_TIMEOUT (5)
+/* The max size of datagram. */
+#define MAX_DATAGRAM_SIZE (2048)
 
-static int print_addr(const char *progname, const struct addrinfo *addr) {
-	char ipstr_all[MAX(INET_ADDRSTRLEN, INET6_ADDRSTRLEN)] = {0};
-	struct in_addr  addr4 = {0};
-	struct in6_addr addr6 = {0};
-	void *addr_all = NULL;
+/* Mutex that is locked and unlocked when using logging functions. */
+static pthread_mutex_t log_mutex = {0};
 
-	if (addr->ai_family == AF_INET) {
-		addr4 = ((struct sockaddr_in *)addr->ai_addr)->sin_addr;
-		addr_all = &addr4;
-	} else if (addr->ai_family == AF_INET6) {
-		addr6 = ((struct sockaddr_in6 *)addr->ai_addr)->sin6_addr;
-		addr_all = &addr6;
-	} else {
-		fprintf(stderr, "%s: ipv4 and ipv6 not detected;"
-		        " unsupported protocol\n", progname);
-		return EXIT_FAILURE;
-	}
+/* Program name, used in logging functions. */
+static char *progname = "";
 
-	const char *ret2 = inet_ntop(addr->ai_family,
-	                             addr_all, ipstr_all,
-	                             addr->ai_addrlen);
-	if (ret2 != ipstr_all) {
-		fprintf(stderr, "%s: %s\n", progname, strerror(errno));
-		return EXIT_FAILURE;
-	}
+/* Various logging functions. */
+bool pdebug_enabled = true;
+bool pwarn_enabled = true;
+bool perr_enabled = true;
 
-	fprintf(stderr, "%s: Configured listening address on %s\n", progname,
-	        ipstr_all);
+static inline void pdebug(const char *format, ...);
+static inline void pwarn(const char *format, ...);
+static inline void perr(const char *format, ...);
 
-	return EXIT_SUCCESS;
-}
+/* Create addrinfo from supplied info. If bind_ips is NULL, the OS chooses
+ * an address to bind to.
+ */
+static int create_addrinfo(const char *port,
+    const char *bind_ips[MAX_BIND_COUNT], size_t bind_ips_len,
+    struct addrinfo **addr);
+/* Convert addrinfo struct to ip, supports both ipv4 and ipv6.
+ * The returned string is allocated in static memory.
+ */
+static const char *addr2str(const struct addrinfo *addr);
+static thread_local char _ip_buffer[MAX(INET6_ADDRSTRLEN, INET_ADDRSTRLEN)] = {0};
 
-static void *loop_func(void *args);
+/* The main read and write loop, used in new threads. */
+static void *rw_loop_func(void *args);
+struct rw_loop_args {
+	int sfd;
+	bool run;
+};
 
-int main(int argc, char *argv[]) {
-	char *port = NULL;
-	struct addrinfo hints = {0}, *addr = NULL, *na = NULL;
-	pthread_t thread_arr[MAX_THERAD_COUNT] = {0};
-	/* Array telling if thread is empty. 1-valid,0-invalid */
-	int threadvalid_arr[MAX_THERAD_COUNT] = {0};
-	int sfd_arr[MAX_THERAD_COUNT] = {0};
-	int ret = 0, sfd_len = 0;
+int main(int argc, char *argv[])
+{
+	struct addrinfo *addr = NULL;
+	char *port = "";
+	char *bind_ips[MAX_BIND_COUNT] = {0};
+	size_t bind_ips_len = 0;
+	int status = EXIT_FAILURE, ret = 0;
+	int sfd_arr[MAX_BIND_COUNT] = {0};
+	size_t sfd_arr_len = 0;
+	pthread_t children[MAX_BIND_COUNT] = {0};
+	size_t children_len = 0;
+	struct rw_loop_args children_args[MAX_BIND_COUNT] = {0};
+	size_t children_args_len = 0;
 
-	/* Read & parse arguments */
-	if (argc < 2) {
-		fprintf(stderr, "%s: Not enough arguments\n", argv[0]);
-		return EXIT_FAILURE;
-	}
-	port = argv[1];
-
-	/* Setup hints */
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_DGRAM;
-	hints.ai_flags = AI_PASSIVE;
-	hints.ai_protocol = IPPROTO_UDP;
-
-	/* Get listening address */
-	ret = getaddrinfo(NULL, port, &hints, &addr);
+	/* Setup pthread mutex. */
+	ret = pthread_mutex_init(&log_mutex, NULL);
 	if (ret != 0) {
-		fprintf(stderr, "%s: %s\n", argv[0], gai_strerror(ret));
-		return EXIT_FAILURE;
-	} else {
-		/* Print addresses */
-		na = addr;
-		while (na != NULL) {
-			ret = print_addr(argv[0], na);
-			if (ret != EXIT_SUCCESS) return EXIT_FAILURE;
-
-			na = na->ai_next;
-		}
+		perr("Failed to create log_mutex: %s", strerror(errno));
+		goto mutex_err;
 	}
 
-	/* Bind socket and then start master loop in new thread. */
-	size_t n = 0;
-	for (na = addr; na != NULL; na = na->ai_next, n++) {
-		/* Create socket. */
-		int sfd = socket(na->ai_family, na->ai_socktype, na->ai_protocol);
-		if (sfd == -1) {
-			fprintf(stderr, "%s: Failed create socket of: %s\n", argv[0],
-			        strerror(errno));
-			print_addr(argv[0], na);
-			continue;
-		}
-
-		/* Bind socket to address. */
-		ret = bind(sfd, na->ai_addr, na->ai_addrlen);
-		if (ret != 0) {
-			fprintf(stderr, "%s: Failed to bind fd of: %s\n", argv[0],
-			        strerror(errno));
-			print_addr(argv[0], na);
-			close(sfd);
-			continue;
-		}
-
-		/* Create new thread that handles requests. */
-		ret = pthread_create(&(thread_arr[n]), NULL, loop_func, &(sfd_arr[n]));
-		if (ret != 0) {
-			fprintf(stderr, "%s: Failed to create thread for: %s\n", argv[0],
-			        strerror(errno));
-			print_addr(argv[0], na);
-			close(sfd);
-			thread_arr[n] = 0;
-			threadvalid_arr[n] = 0;
-			continue;
-		}
-		threadvalid_arr[n] = 1;
-
-		++sfd_len;
-	}
-	fprintf(stderr, "%s: Binded on %d address(es)\n", argv[0], sfd_len);
-
-	freeaddrinfo(addr);
-
-	for (size_t n = 0; n < MAX_THERAD_COUNT; ++n) {
-		if (threadvalid_arr[n] == 1) {
-			ret = pthread_join(thread_arr[n], NULL);
-			if (ret != 0) {
-				fprintf(stderr, "%s: %s\n", argv[0], strerror(errno));
+	progname = argv[0];
+	/* Parse args. argc variables:
+	 * 0: progname
+	 * 1: port
+	 * 2+: addresses to bind to
+	 */
+	if (argc == 2) {
+		port = argv[1];
+	} else if (argc > 2) {
+		port = argv[1];
+		for (int n = 2; n < argc; ++n) {
+			if (bind_ips_len >= MAX_BIND_COUNT - 1) {
+				perr("Too many interfaces provided");
+				goto args_err;
 			}
+			bind_ips[bind_ips_len++] = argv[n];
 		}
+	} else {
+		perr("Not enough arguments");
+		goto args_err;
 	}
 
-	return 0;
+	/* Create addrinfo from supplied info. */
+	ret = create_addrinfo(port, (const char **)bind_ips, bind_ips_len,
+	    &addr);
+	if (ret != 0) {
+		perr("Failed to create addrinfo: Please check port and ip");
+		goto addrinfo_err;
+	}
+
+	/* Fill fd arr with -1. */
+	for (size_t n = 0; n < MAX_BIND_COUNT; ++n) {
+		sfd_arr[n] = -1;
+	}
+	/* Create sockets and then bind them. */
+	for (struct addrinfo *ca = addr; ca != NULL; ca = ca->ai_next) {
+		/* Create socket. */
+		int sfd = socket(ca->ai_family, ca->ai_socktype,
+		    ca->ai_protocol);
+		if (sfd == -1) {
+			pwarn("Failed to create socket (%s): %s",
+			    addr2str(ca),
+			    strerror(errno));
+			continue;
+		}
+		pdebug("Created socket %i", sfd, addr2str(ca));
+
+		/* Bind socket. */
+		ret = bind(sfd, ca->ai_addr, ca->ai_addrlen);
+		if (ret != 0) {
+			pwarn("Failed to bind '%s' to %i: %s", addr2str(ca),
+			    sfd, strerror(errno));
+			close(sfd);
+			continue;
+		}
+		pdebug("Bound '%s' to %i", addr2str(ca), sfd);
+
+		/* Setup timeout on socket. */
+		struct timeval tv = {0};
+		tv.tv_sec = MAX_RECV_TIMEOUT;
+		ret = setsockopt(sfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+		if (ret != 0) {
+			pwarn("Failed to set socket timeout: %s",
+			    strerror(errno));
+			close(sfd);
+			continue;
+		}
+
+		/* Add to array of sockets. */
+		if (sfd_arr_len >= MAX_BIND_COUNT) {
+			pwarn("Reached socket limit (%zu)", sfd_arr_len);
+			close(sfd);
+			break;
+		}
+		sfd_arr[sfd_arr_len++] = sfd;
+	}
+	if (sfd_arr_len == 0) {
+		perr("No sockets created, aborting");
+		goto socket_err;
+	}
+
+	/* Create one thread per fd. */
+	for (size_t n = 0; n < sfd_arr_len; ++n) {
+		pthread_t thread = 0;
+
+		children_args[n].sfd = sfd_arr[n];
+		children_args[n].run = true;
+		ret = pthread_create(&thread, NULL, rw_loop_func,
+		    &children_args[n]);
+		if (ret != 0) {
+			perr("Failed to create thread for %i: %s", sfd_arr[n],
+			    strerror(errno));
+			goto thread_err;
+		}
+
+		if (children_len >= MAX_BIND_COUNT) {
+			pwarn("Thread limit reached (%zu)", children_len);
+			break;
+		}
+		children[children_len++] = thread;
+	}
+
+	sleep(40);
+	status = 0;
+
+thread_err:
+	/* Join all threads, and wait for them to stop. */
+	for (size_t n = 0; n < children_len; ++n) {
+		children_args[n].run = false;
+		ret = pthread_join(children[n], NULL);
+		if (ret != 0) {
+			perr("Error from pthread_join: %s", strerror(errno));
+		}
+	}
+	/* Close all open sockets/fds. */
+	for (size_t n = 0; n < sfd_arr_len; ++n) {
+		/* Socket 0,1,2 are used by stdin, stdout and stderr. */
+		if (sfd_arr[n] != -1) {
+			close(sfd_arr[n]);
+		}
+	}
+socket_err:
+	freeaddrinfo(addr);
+addrinfo_err:
+	pthread_mutex_destroy(&log_mutex);
+mutex_err:
+args_err:
+	return status;
 }
 
-static void *loop_func(void *args) {
-	printf("thread sfd %d\n", *((int *)args));
+static void *rw_loop_func(void *args0)
+{
+	struct rw_loop_args *args = args0;
+	char buffer[MAX_DATAGRAM_SIZE] = {0};
+	struct sockaddr_in6 sockaddr = {0};
+	struct addrinfo addr = {0};
+	ssize_t ret = 0, bytes = 0;
+
+	addr.ai_addr = (struct sockaddr*)&sockaddr;
+
+	pdebug("s%i: Started master loop", args->sfd);
+
+	while (args->run) {
+		/* Set correct size before calling. */
+		addr.ai_addrlen = sizeof(struct sockaddr_in6);
+		/* Reset ip to 0. */
+		memset(addr.ai_addr, 0, sizeof(struct sockaddr_in6));
+
+		/* Receive message and store sender ip in addr.ai_addr. */
+		ret = recvfrom(args->sfd, buffer, sizeof(buffer), 0,
+		    addr.ai_addr, &addr.ai_addrlen);
+
+		/* Set family according to size of struct. */
+		addr.ai_family = addr.ai_addrlen == sizeof(struct sockaddr_in) ?
+		    AF_INET : AF_INET6;
+		/* Print sender ip and bytes read. */
+		if (ret < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				pdebug("s%i: TIMEOUT", args->sfd,
+				    addr2str(&addr), ret);
+				continue;
+			}
+			perr("Encountered error from recvfrom: %s",
+			     strerror(errno));
+			return NULL+1;
+		} else {
+			bytes = ret;
+			pdebug("s%i: %s: %d bytes", args->sfd, addr2str(&addr),
+			    bytes);
+		}
+
+		/* Send the message back. */
+		ret = sendto(args->sfd, buffer, (size_t)bytes, 0, addr.ai_addr,
+		    addr.ai_addrlen);
+		if (ret < 0) {
+			perr("Encountered error from sendto: %s",
+			    strerror(errno));
+			return NULL+1;
+		} else if (ret < bytes) {
+			pwarn("Could not send full message (%zu of %zu): %s",
+			    (size_t)ret, (size_t)bytes, strerror(errno));
+		}
+	}
 
 	return NULL;
+}
+
+static const char *addr2str(const struct addrinfo *addr)
+{
+	if (addr->ai_family == AF_INET) {
+		struct sockaddr_in *a4 = (struct sockaddr_in *)addr->ai_addr;
+		const char *ret = inet_ntop(AF_INET, (void *)&a4->sin_addr,
+		    _ip_buffer, sizeof(_ip_buffer));
+		if (ret == NULL) {
+			perr("Failed to convert addrinfo4 to str: %s",
+			    strerror(errno));
+			return NULL;
+		}
+		return ret;
+	} else if(addr->ai_family == AF_INET6) {
+		struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)addr->ai_addr;
+		const char *ret = inet_ntop(AF_INET6,
+		    (void *)&a6->sin6_addr, _ip_buffer, sizeof(_ip_buffer));
+		if (ret == NULL) {
+			perr("Failed to convert addrinfo6 to str: %s",
+			    strerror(errno));
+			return NULL;
+		}
+		return ret;
+	} else {
+		perr("Failed to convert addrinfo to str: Unknown ip family");
+		return NULL;
+	}
+}
+
+static int create_addrinfo(const char *port,
+    const char *bind_ips[MAX_BIND_COUNT], size_t bind_ips_len,
+    struct addrinfo **out)
+{
+	struct addrinfo *first = NULL, *current = NULL, hints = {0};
+	int status = 1, ret = 0;
+
+	hints.ai_family = AF_UNSPEC; /* Any IP version. */
+	hints.ai_socktype = SOCK_DGRAM; /* Must be datagram. */
+	/* Host must be an ip and if no host is provided let the os choose. */
+	hints.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
+	hints.ai_protocol = IPPROTO_UDP; /* Must be UDP. */
+
+	for (size_t n = 0; n < bind_ips_len; ++n) {
+		ret = getaddrinfo(bind_ips[n], port, &hints, &current);
+		if (ret != 0) {
+			if (first != NULL) {
+				freeaddrinfo(first);
+			}
+			perr("Failed to getaddrinfo: %s", gai_strerror(ret));
+			goto getaddrinfo_err;
+		}
+		if (first == NULL) {
+			first = current;
+		} else {
+			/* Set the last element of first to current. */
+			struct addrinfo *tmp = first;
+			while (tmp->ai_next != NULL) {
+				tmp = tmp->ai_next;
+			}
+			tmp->ai_next = current;
+		}
+	}
+
+	if (bind_ips_len == 0) {
+		ret = getaddrinfo(NULL, port, &hints, &first);
+		if (ret != 0) {
+			perr("Failed to getaddrinfo: %s", gai_strerror(ret));
+			goto getaddrinfo_err;
+		}
+	}
+
+	status = 0;
+	*out = first;
+
+getaddrinfo_err:
+	return status;
+}
+
+static inline void pdebug(const char *format, ...)
+{
+	pthread_mutex_lock(&log_mutex);
+
+	if (!pdebug_enabled) return;
+	va_list ap;
+
+	fprintf(stderr, "%s: DEBUG: ", progname);
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+
+	pthread_mutex_unlock(&log_mutex);
+}
+
+static inline void pwarn(const char *format, ...)
+{
+	pthread_mutex_lock(&log_mutex);
+
+	if (!pwarn_enabled) return;
+	va_list ap;
+
+	fprintf(stderr, "%s: WARN: ", progname);
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+
+	pthread_mutex_unlock(&log_mutex);
+}
+
+
+static inline void perr(const char *format, ...)
+{
+	pthread_mutex_lock(&log_mutex);
+
+	if (!perr_enabled) return;
+	va_list ap;
+
+	fprintf(stderr, "%s: ERROR: ", progname);
+	va_start(ap, format);
+	vfprintf(stderr, format, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+
+	pthread_mutex_unlock(&log_mutex);
 }
