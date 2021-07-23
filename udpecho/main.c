@@ -255,7 +255,7 @@ static void *rw_loop_func(void *args0)
 {
 	struct rw_loop_args *args = args0;
 	char buffer[MAX_DATAGRAM_SIZE] = {0};
-	struct sockaddr_in6 sockaddr = {0};
+	struct sockaddr_storage sockaddr = {0};
 	struct addrinfo addr = {0};
 	ssize_t ret = 0, bytes = 0;
 
@@ -265,9 +265,9 @@ static void *rw_loop_func(void *args0)
 
 	while (atomic_load(&args->run) == true) {
 		/* Set correct size before calling. */
-		addr.ai_addrlen = sizeof(struct sockaddr_in6);
+		addr.ai_addrlen = sizeof(sockaddr);
 		/* Reset ip to 0. */
-		memset(addr.ai_addr, 0, sizeof(struct sockaddr_in6));
+		memset(addr.ai_addr, 0, sizeof(sockaddr));
 
 		/* Receive message and store sender ip in addr.ai_addr. */
 		ret = recvfrom(args->sfd, buffer, sizeof(buffer), 0,
