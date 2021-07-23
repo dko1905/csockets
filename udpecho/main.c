@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <netdb.h>
 
 #ifdef __STDC_NO_THREADS__
