@@ -24,6 +24,8 @@
 #include <threads.h>
 #endif
 
+#include "users.h"
+
 /* Helper macros. */
 #define MAX(_a, _b) ((_a > _b) ? _a : _b)
 #define MIN(_a, _b) ((_a < _b) ? _a : _b)
@@ -38,20 +40,12 @@
 #define MAX_DATAGRAM_SIZE (2048)
 /* Max number of active users. */
 #define MAX_ACTIVE_USER_COUNT (2)
-/* */
+/* Max size of chat message (from chat user). */
 #define MAX_MSG_SIZE (120)
 
 /* TODO: write comment for chat_user. */
-struct chat_user {
-	struct sockaddr_storage addr;
-	/* Messages sent in 60 second interval, NOT in the last 60 seconds. */
-	int messages_in60;
-	/* Messages sent in 5 second interval, NOT in the last 5 seconds. */
-	int messages_in5;
-};
-static struct chat_user active_users[MAX_ACTIVE_USER_COUNT] = {0};
-static size_t active_users_len = 0;
-static pthread_mutex_t active_users_mutex = {0};
+static struct chat_user_queue active_users = {0};
+static pthread_mutex_t active_users_lock = {0};
 
 /* Mutex that is locked and unlocked when using logging functions. */
 static pthread_mutex_t log_mutex = {0};
@@ -60,9 +54,9 @@ static pthread_mutex_t log_mutex = {0};
 static char *progname = "";
 
 /* Various logging functions. */
-bool pdebug_enabled = true;
-bool pwarn_enabled = true;
-bool perr_enabled = true;
+atomic_bool pdebug_enabled = true;
+atomic_bool pwarn_enabled = true;
+atomic_bool perr_enabled = true;
 
 static inline void pdebug(const char *format, ...);
 static inline void pwarn(const char *format, ...);
@@ -111,7 +105,7 @@ int main(int argc, char *argv[])
 		perr("Failed to create log_mutex: %s", strerror(errno));
 		goto mutex_err;
 	}
-	ret = pthread_mutex_init(&active_users_mutex, NULL);
+	ret = pthread_mutex_init(&active_users_lock, NULL);
 	if (ret != 0) {
 		perr("Failed to create active user mutex: %s", strerror(errno));
 		pthread_mutex_destroy(&log_mutex);
@@ -134,6 +128,13 @@ int main(int argc, char *argv[])
 		perr("Failed to set procmask: %s", strerror(errno));
 		goto sigset_err;
 	}
+	/* Setup active user queue. */
+	ret = chat_user_queue_init(MAX_ACTIVE_USER_COUNT, &active_users);
+	if (ret != 0) {
+		perr("Failed to create active user queue: %s", strerror(errno));
+		goto active_users_err;
+	}
+
 
 	/* Set program name. */
 	progname = argv[0];
@@ -285,8 +286,10 @@ thread_err:
 socket_err:
 	freeaddrinfo(addr);
 addrinfo_err:
+	chat_user_queue_free(&active_users);
+active_users_err:
 sigset_err:
-	pthread_mutex_destroy(&active_users_mutex);
+	pthread_mutex_destroy(&active_users_lock);
 	pthread_mutex_destroy(&log_mutex);
 mutex_err:
 args_err:
@@ -321,8 +324,11 @@ static void *rw_loop_func(void *args0)
 		/* Print sender ip and bytes read. */
 		if (ret < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				pdebug("s%i: TIMEOUT", args->sfd,
-				    addr2str(&addr), ret);
+				pdebug("s%i: TIMEOUT", args->sfd);
+				continue;
+			} else if (errno == EINTR) {
+				pdebug("s%i: recvfrom: Interrupt, ignoreing",
+				    args->sfd);
 				continue;
 			}
 			perr("Encountered error from recvfrom: %s",
@@ -335,17 +341,45 @@ static void *rw_loop_func(void *args0)
 		}
 
 		/* Add/update (to) active users. */
-		ret = pthread_mutex_lock(&active_users_mutex);
+		ret = pthread_mutex_lock(&active_users_lock);
 		if (ret != 0) {
 			perr("Failed to lock active user mutex: %s",
 			    strerror(errno));
 			return NULL+1;
 		}
+		struct chat_user user = {0};
+		memcpy(&user.addr, addr.ai_addr, addr.ai_addrlen);
+		/* Search for user. */
+		if (chat_user_queue_includes(&active_users, &user) == 1) {
+			pdebug("Found");
+		} else {
+			ret = chat_user_queue_push(&active_users, &user);
+			if (ret == 1) {
+				pdebug("full, removing");
+				ret = chat_user_queue_pop(&active_users, NULL);
+				if (ret != 0) {
+					perr("s%i: Failed to pop", args->sfd);
+					return NULL+1;
+				}
+				ret = chat_user_queue_push(&active_users, &user);
+				if (ret != 0) {
+					perr("s%i: Failed to push", args->sfd);
+					return NULL+1;
+				}
+			}
+			pdebug("added");
+		}
+
+		ret = pthread_mutex_unlock(&active_users_lock);
+		if (ret != 0) {
+			perr("Failed to unlock active user mutex: %s",
+			    strerror(errno));
+		}
 
 		/* TODO: throattale. */
 
 		/* Send message to all active users. */
-		for (size_t n = 0; n < active_users_len; ++n) {
+		for (size_t n = 0; n < 1; ++n) {
 			/* TODO: this */
 		}
 
@@ -446,7 +480,7 @@ static inline void pdebug(const char *format, ...)
 {
 	pthread_mutex_lock(&log_mutex);
 
-	if (!pdebug_enabled) return;
+	if (!atomic_load(&pdebug_enabled)) return;
 	va_list ap;
 
 	fprintf(stderr, "%s: DEBUG: ", progname);
@@ -462,7 +496,7 @@ static inline void pwarn(const char *format, ...)
 {
 	pthread_mutex_lock(&log_mutex);
 
-	if (!pwarn_enabled) return;
+	if (!atomic_load(&pwarn_enabled)) return;
 	va_list ap;
 
 	fprintf(stderr, "%s: WARN: ", progname);
@@ -479,7 +513,7 @@ static inline void perr(const char *format, ...)
 {
 	pthread_mutex_lock(&log_mutex);
 
-	if (!perr_enabled) return;
+	if (!atomic_load(&perr_enabled)) return;
 	va_list ap;
 
 	fprintf(stderr, "%s: ERROR: ", progname);
