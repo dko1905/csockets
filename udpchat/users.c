@@ -99,6 +99,29 @@ int chat_user_queue_pop(struct chat_user_queue *queue,
 	return 0;
 }
 
+int chat_user_queue_every(const struct chat_user_queue *queue,
+    chat_user_queue_every_func_t func, void *args)
+{
+	size_t n = queue->start;
+	/* If empty cancel. */
+	if (queue->size == 0) return 0;
+
+	/* If stop if before start go to the end of the buffer. */
+	if (queue->start >= queue->stop) {
+		while (n < queue->size) {
+			func(&queue->buffer[n % queue->cap], args);
+			++n;
+		}
+		n = 0;
+	}
+	/* Traverse the rest if needed. */
+	while (n < queue->stop) {
+		func(&queue->buffer[n % queue->cap], args);
+		++n;
+	}
+	return 0;
+}
+
 void chat_user_queue_free(struct chat_user_queue *queue)
 {
 	if (queue != NULL && queue->buffer != NULL)

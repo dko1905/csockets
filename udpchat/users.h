@@ -18,6 +18,8 @@ struct chat_user_queue {
 	struct chat_user *buffer;
 };
 
+typedef void (*chat_user_queue_every_func_t)(const struct chat_user *, void *);
+
 int chat_user_queue_init(size_t _cap, struct chat_user_queue *_queue);
 /* Add user to queue, returns 0 on success and 1 if it's full. */
 int chat_user_queue_push(struct chat_user_queue *_queue,
@@ -29,6 +31,8 @@ int chat_user_queue_pop(struct chat_user_queue *_queue,
 /* Return: 0 - false, 1 - true, -1 - error*/
 int chat_user_queue_includes(const struct chat_user_queue *_queue,
     const struct chat_user *_user);
+int chat_user_queue_every(const struct chat_user_queue *_queue,
+    chat_user_queue_every_func_t _func, void *args);
 void chat_user_queue_free(struct chat_user_queue *_queue);
 
 #endif
