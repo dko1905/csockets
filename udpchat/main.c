@@ -38,7 +38,7 @@
 #define MAX_DATAGRAM_SIZE (2048)
 /* Max number of active users. */
 #define MAX_ACTIVE_USER_COUNT (2)
-/* Max size of message to send to all active users. */
+/* */
 #define MAX_MSG_SIZE (120)
 
 /* TODO: write comment for chat_user. */
@@ -89,13 +89,16 @@ struct rw_loop_args {
 
 int main(int argc, char *argv[])
 {
+	int status = EXIT_FAILURE, ret = 0;
+	/* Addresses */
 	struct addrinfo *addr = NULL;
 	char *port = "";
 	char *bind_ips[MAX_BIND_COUNT] = {0};
 	size_t bind_ips_len = 0;
-	int status = EXIT_FAILURE, ret = 0;
+	/* File descritors */
 	int sfd_arr[MAX_BIND_COUNT] = {0};
 	size_t sfd_arr_len = 0;
+	/* Threading */
 	pthread_t children[MAX_BIND_COUNT] = {0};
 	size_t children_len = 0;
 	struct rw_loop_args children_args[MAX_BIND_COUNT] = {0};
@@ -179,6 +182,22 @@ int main(int argc, char *argv[])
 			continue;
 		}
 		pdebug("Created socket %i", sfd, addr2str(ca));
+
+
+#ifdef __linux__
+		/* Disable dual stack on Linux. */
+		if (ca->ai_family == AF_INET6) {
+			int use_v6only = 1; /* true */
+			ret = setsockopt(sfd, IPPROTO_IPV6, IPV6_V6ONLY,
+			    &use_v6only, sizeof(use_v6only));
+			if (ret != 0) {
+				perr("Failed to disable dualstack (linux): %s",
+				    strerror(errno));
+				close(sfd);
+				continue;
+			}
+		}
+#endif
 
 		/* Bind socket. */
 		ret = bind(sfd, ca->ai_addr, ca->ai_addrlen);
@@ -315,12 +334,19 @@ static void *rw_loop_func(void *args0)
 			    bytes);
 		}
 
-		/* TODO: throtale (I know it's spelled wrong). */
+		/* Add/update (to) active users. */
+		ret = pthread_mutex_lock(&active_users_mutex);
+		if (ret != 0) {
+			perr("Failed to lock active user mutex: %s",
+			    strerror(errno));
+			return NULL+1;
+		}
+
+		/* TODO: throattale. */
 
 		/* Send message to all active users. */
 		for (size_t n = 0; n < active_users_len; ++n) {
-			ret = sendto(args->sfd, buffer, 
-			    MIN((size_t)bytes, ), )
+			/* TODO: this */
 		}
 
 		/* Send the message back. */
