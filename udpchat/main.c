@@ -43,9 +43,14 @@
 /* Max size of chat message (from chat user). */
 #define MAX_MSG_SIZE (120)
 
-/* TODO: write comment for chat_user. */
+/* TODO: write comment for chat_user*. */
 static struct chat_user_queue active_users = {0};
 static pthread_mutex_t active_users_lock = {0};
+struct active_user_send_func_args {
+	int sfd;
+	char *buffer;
+	size_t buffer_len;
+};
 static void active_user_send_func(const struct chat_user *user, void *args);
 
 /* Mutex that is locked and unlocked when using logging functions. */
@@ -297,12 +302,22 @@ args_err:
 	return status;
 }
 
-static void active_user_send_func(const struct chat_user *user, void *args)
+static void active_user_send_func(const struct chat_user *user, void *args1)
 {
+	struct active_user_send_func_args *args = args1;
+	int ret = 0;
+
+	ret = sendto(args->sfd, args->buffer, args->buffer_len, 0,
+	    (struct sockaddr *)&user->addr, user->addr_len);
+	if (ret != args->buffer_len) {
+		perr("s%i: sendto: %s", args->sfd, strerror(errno));
+		return;
+	}
+
 	struct sockaddr *ai_addr = (struct sockaddr *)&user->addr;
 	struct sockaddr_in *tmp = (void *)ai_addr;
 	struct in_addr tmp1 = tmp->sin_addr;
-	pdebug("----!----: %s", inet_ntoa(tmp1));
+	pdebug("s%i: ----!----: %s", args->sfd, inet_ntoa(tmp1));
 }
 
 static void *rw_loop_func(void *args0)
@@ -380,59 +395,17 @@ static void *rw_loop_func(void *args0)
 			pdebug("added");
 		}
 
+		struct active_user_send_func_args func_args = {0};
+		func_args.sfd = args->sfd;
+		func_args.buffer = buffer;
+		func_args.buffer_len = bytes;
+		chat_user_queue_every(&active_users, active_user_send_func,
+		    &func_args);
+
 		ret = pthread_mutex_unlock(&active_users_lock);
 		if (ret != 0) {
 			perr("Failed to unlock active user mutex: %s",
 			    strerror(errno));
-		}
-
-		/* TODO: throattale. */
-
-		/* TODO: make this nicer, maybe split into new function? */
-		/* Send message to all active users. Copied from users.c */
-		/* Rename variables because I don't want to change the code. */
-		struct chat_user_queue* queue = &active_users;
-		size_t n = 0;
-		if (queue->size == 0) return 0;
-
-		/* If stop if before start go to the end of the buffer. */
-		if (queue->start >= queue->stop) {
-			while (n < queue->size) {
-				const struct chat_user *user1 = &queue->buffer[n % queue->cap];
-				addr.ai_addr = (struct sockaddr *)&user1->addr;
-				struct sockaddr_in *tmp = (void *)addr.ai_addr;
-				struct in_addr tmp1 = tmp->sin_addr;
-				addr.ai_addrlen = user1->addr_len;
-				ret = sendto(args->sfd, buffer, (size_t)bytes, 0, addr.ai_addr,
-				    addr.ai_addrlen);
-				if (ret < 0) {
-					perr("Encountered error from sendto: %s",
-					    strerror(errno));
-					return NULL+1;
-				} else if (ret < bytes) {
-					pwarn("Could not send full message (%zu of %zu): %s",
-					    (size_t)ret, (size_t)bytes, strerror(errno));
-				}
-				++n;
-			}
-			n = 0;
-		}
-		/* Traverse the rest if needed. */
-		while (n < queue->stop) {
-			const struct chat_user *user1 = &queue->buffer[n % queue->cap];
-			addr.ai_addr = (struct sockaddr *)&user1->addr;
-			addr.ai_addrlen = user1->addr_len;
-			ret = sendto(args->sfd, buffer, (size_t)bytes, 0, addr.ai_addr,
-			    addr.ai_addrlen);
-			if (ret < 0) {
-				perr("Encountered error from sendto: %s",
-				    strerror(errno));
-				return NULL+1;
-			} else if (ret < bytes) {
-				pwarn("Could not send full message (%zu of %zu): %s",
-				    (size_t)ret, (size_t)bytes, strerror(errno));
-			}
-			++n;
 		}
 	}
 
