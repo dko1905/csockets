@@ -2,37 +2,36 @@
 #define USERS_H
 
 #include <stddef.h>
+#include <time.h>
 #include <netdb.h>
 
-struct chat_user {
+struct user {
 	/* Address of client. */
 	struct sockaddr_storage addr;
 	socklen_t addr_len;
+	int recv_sfd;
 
 	/* Throatteling infomation. */
 	int messages_in5s; /* Messages sent in last 5 seconds. */
+	time_t last_msg; /* used to kick users. */
+
+	/* Private infomation. */
+	struct user *next;
+	struct user *prev;
 };
 
-struct chat_user_queue {
-	size_t start, stop, size, cap;
-	struct chat_user *buffer;
+struct user_table {
+	struct user *start, *end;
+	time_t timeout;
 };
 
-typedef void (*chat_user_queue_every_func_t)(const struct chat_user *, void *);
+typedef void (*user_table_every_func_t)(const struct user *, void *);
 
-int chat_user_queue_init(size_t _cap, struct chat_user_queue *_queue);
-/* Add user to queue, returns 0 on success and 1 if it's full. */
-int chat_user_queue_push(struct chat_user_queue *_queue,
-    const struct chat_user *_user);
-int chat_user_queue_peek(const struct chat_user_queue *_queue,
-    struct chat_user *_user);
-int chat_user_queue_pop(struct chat_user_queue *_queue,
-    struct chat_user *_user);
-/* Return: 0 - false, 1 - true, -1 - error*/
-int chat_user_queue_includes(const struct chat_user_queue *_queue,
-    const struct chat_user *_user);
-int chat_user_queue_every(const struct chat_user_queue *_queue,
-    chat_user_queue_every_func_t _func, void *args);
-void chat_user_queue_free(struct chat_user_queue *_queue);
+int user_table_init(struct user_table *_table, time_t _timeout);
+/* Used to keep user in table, will also kick timeed out users. */
+int user_table_update(struct user_table *_table, const struct user *_user);
+int user_table_every(const struct user_table *_table,
+    user_table_every_func_t _func, void *args);
+void user_table_free(struct user_table *_table);
 
 #endif

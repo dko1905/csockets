@@ -16,6 +16,7 @@
 #include <netdb.h>
 
 #include "util/net.h"
+#include "users.h"
 
 /* == Helper macros == */
 #define MAX(_a, _b) ((_a > _b) ? _a : _b)
@@ -47,6 +48,10 @@
 /* Max size of message that can be received. */
 #define MAX_MSG_SIZE (2048)
 #endif
+#ifndef ACTUSER_TIMEOUT
+/* Timeout before removeing user from active users (in seconds). */
+#define ACTUSER_TIMEOUT (3000)
+#endif
 
 /* == Globals == */
 static char *progname = "";
@@ -56,6 +61,7 @@ static void *master_func(void *args);
 struct master_func_args {
 	int *sfd_arr;
 	size_t sfd_arr_len;
+	int send_fd4, send_fd6;
 	volatile bool *run;
 };
 /* On message handle.
@@ -64,7 +70,16 @@ struct master_func_args {
  * 0 - success
  * 1 - error
 */
-static int msg_handle(int sfd);
+static int msg_handle(int sfd, struct master_func_args *mf_args,
+    struct user_table *active_users);
+/* sendall_func is called by user_table_every to send message to other users. */
+static void sendall_func(const struct user *user, void *args0);
+struct sendall_func_args {
+	int sfd;
+	int send_fd4, send_fd6;
+	char *buffer;
+	size_t buffer_len;
+};
 
 int main(int argc, char *argv[])
 {
@@ -80,6 +95,7 @@ int main(int argc, char *argv[])
 	/* Array of bound sockets. */
 	int sfd_arr[MAX_BIND_COUNT] = {0};
 	size_t sfd_arr_len = 0;
+	int send_fd4 = 0, send_fd6 = 0;
 	/* Args to master_func. */
 	struct master_func_args master_args = {0};
 	bool master_args_run = true;
@@ -128,6 +144,20 @@ int main(int argc, char *argv[])
 		    strerror(errno));
 		goto catchset_err;
 	}
+
+	/* Create send_fd4 & 6. */
+	ret = socket(AF_INET, SOCK_DGRAM, 0);
+	if (ret < 0) {
+		perror("Failed to setup send_fd4: %s", strerror(errno));
+		goto send_fd4_err;
+	}
+	send_fd4 = ret;
+	ret = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (ret < 0) {
+		perror("Failed to setup send_fd6: %s", strerror(errno));
+		goto send_fd6_err;
+	}
+	send_fd6 = ret;
 
 	/* Create address info from provided infomation. */
 	ret = create_addrinfo(port, (const char **)bind_ips, bind_ips_len,
@@ -194,6 +224,8 @@ int main(int argc, char *argv[])
 	/* Start master thread. */
 	master_args.sfd_arr = sfd_arr;
 	master_args.sfd_arr_len = sfd_arr_len;
+	master_args.send_fd4 = send_fd4;
+	master_args.send_fd6 = send_fd6;
 	master_args.run = &master_args_run; /* I think this makes it volatile. */
 	ret = pthread_create(&master_thread, NULL, master_func, &master_args);
 	if (ret != 0) {
@@ -226,19 +258,32 @@ pthread_err:
 socket_err:
 	freeaddrinfo(addr);
 addrinfo_err:
+	close(send_fd6);
+send_fd6_err:
+	close(send_fd4);
+send_fd4_err:
 catchset_err:
 args_err:
 	return status;
 }
 
-
-static void *master_func(void *args0) {
+static void *master_func(void *args0)
+{
 	struct master_func_args *args = (struct master_func_args *)args0;
 	/* Poll array to poll(3). */
 	struct pollfd poll_arr[MAX_BIND_COUNT] = {0};
 	size_t poll_arr_len = 0;
 	/* General return from various functions. */
 	int ret = 0;
+	/* Active user ring buffer. */
+	struct user_table active_users = {0};
+
+	/* Setup active users queue. */
+	ret = user_table_init(&active_users, ACTUSER_TIMEOUT);
+	if (ret != 0) {
+		perror("Failed to create active users: %s", strerror(errno));
+		goto user_queue_err;
+	}
 
 	/* Fill poll array. */
 	for (size_t n = 0; n < args->sfd_arr_len && n < MAX_BIND_COUNT; ++n) {
@@ -276,7 +321,7 @@ static void *master_func(void *args0) {
 			switch (poll_arr[n].revents) {
 			case POLLIN: /* FALLTHROUGH*/
 			case POLLPRI:
-				ret = msg_handle(sfd);
+				ret = msg_handle(sfd, args, &active_users);
 				if (ret != 0) {
 					goto poll_err;
 				}
@@ -293,18 +338,24 @@ static void *master_func(void *args0) {
 		}
 	}
 
-	/* TODO: Free active client fds. */
 poll_err:
+	user_table_free(&active_users);
+user_queue_err:
 	return NULL;
 }
 
-static int msg_handle(int sfd) {
+static int msg_handle(int sfd, struct master_func_args *mf_args,
+    struct user_table *active_users)
+{
 	int ret = 0;
+	struct sendall_func_args sendall_args = {0};
 	/* Receive buffer. */
 	char buffer[MAX_MSG_SIZE] = {0};
 	size_t buffer_len = 0;
 	struct sockaddr_storage peeraddr = {0};
 	socklen_t peeraddr_len = sizeof(peeraddr);
+	/* Created user from ip. */
+	struct user user = {0};
 
 	/* Read UDP packet. */
 	ret = recvfrom(sfd, buffer, sizeof(buffer), 0,
@@ -338,19 +389,62 @@ static int msg_handle(int sfd) {
 	} else {
 		buffer_len = ret;
 	}
-	/* Successfully read message into buffer and peer address into peeraddr. */
-	ssize_t sendto_ret = sendto(sfd, buffer, buffer_len, 0, (void *)&peeraddr,
-	    peeraddr_len);
-	if (sendto_ret < 1) {
-		perror("%d: sendto: %s", sfd, strerror(errno));
-	} else if (sendto_ret != (ssize_t)buffer_len) {
-		perror("%d: Message cut short (%zd of %zd)", sfd, sendto_ret,
-		    buffer_len);
-	} else {
+	/* Create user and add to table (will allocate on heap). */
 #if PRINT_DEBUG == 1
-		pdebug("%d: Sent %zd bytes", sfd, sendto_ret)
+	pdebug("recv from '%s'", addr2str(AF_INET, (void *)&peeraddr));
 #endif
+	user.addr = peeraddr;
+	user.addr_len = peeraddr_len;
+	user.messages_in5s = 0;
+
+	ret = user_table_update(active_users, &user);
+	if (ret != 0) {
+		perror("Failed to update active user table: %s",
+		    strerror(errno));
+		return 1;
 	}
 
+	sendall_args.buffer = buffer;
+	sendall_args.buffer_len = buffer_len;
+	sendall_args.sfd = sfd;
+	sendall_args.send_fd4 = mf_args->send_fd4;
+	sendall_args.send_fd6 = mf_args->send_fd6;
+	user_table_every(active_users, sendall_func, &sendall_args);
+
 	return 0;
+}
+
+static void sendall_func(const struct user *user, void *args0) {
+	struct sendall_func_args *args = args0;
+	ssize_t bytes = 0;
+
+	if (user->addr_len == sizeof(struct sockaddr_in)) {
+		bytes = sendto(args->send_fd4, args->buffer, args->buffer_len,
+		    0, (void *)&user->addr, user->addr_len);
+		if (bytes < 1) {
+			perror("%d: sendto (%s): %s", args->sfd,
+			    addr2str(AF_INET, (void *)&user->addr),
+			    strerror(errno));
+		} else {
+#if PRINT_DEBUG == 1
+			pdebug("%d: sendto (%s): %zd bytes", args->sfd,
+			    addr2str(AF_INET, (void *)&user->addr),
+			    bytes);
+#endif
+		}
+	} else {
+		bytes = sendto(args->send_fd6, args->buffer, args->buffer_len,
+		    0, (void *)&user->addr, user->addr_len);
+		if (bytes < 1) {
+			perror("%d: sendto (%s): %s", args->sfd,
+			    addr2str(AF_INET6, (void *)&user->addr),
+			    strerror(errno));
+		} else {
+#if PRINT_DEBUG == 1
+			pdebug("%d: sendto (%s): %zd bytes", args->sfd,
+			    addr2str(AF_INET6, (void *)&user->addr),
+			    bytes);
+#endif
+		}
+	}
 }

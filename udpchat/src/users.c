@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <time.h>
 
 /* Allow for custom allocators. */
 #ifndef cmalloc
@@ -12,118 +13,88 @@
 #define cfree free
 #endif
 
-int chat_user_queue_init(size_t cap, struct chat_user_queue *queue)
+int user_table_init(struct user_table *table, time_t timeout)
 {
-	/* Allocate buffer to store queue. */
-	struct chat_user *buffer = cmalloc(cap * sizeof(struct chat_user));
-	if (buffer == NULL) {
-		return 1;
-	}
-
-	/* Fill queue with 0. */
-	*queue = (struct chat_user_queue){0};
-
-	/* Fill with real data. */
-	queue->buffer = buffer;
-	queue->start = 0;
-	queue->stop = 0;
-	queue->cap = cap;
-	queue->size = 0;
+	table->timeout = timeout;
+	table->start = NULL;
+	table->end = NULL;
 
 	return 0;
 }
 
-int chat_user_queue_includes(const struct chat_user_queue *queue,
-    const struct chat_user *user)
-{
-	size_t n = queue->start;
-	/* If empty cancel. */
-	if (queue->size == 0) return 0;
 
-	/* If stop if before start go to the end of the buffer. */
-	if (queue->start >= queue->stop) {
-		while (n < queue->size) {
-			const struct chat_user *user1 = &queue->buffer[n % queue->cap];
-			if (memcmp(&user->addr, &user1->addr,
-			    sizeof(user->addr)) == 0) {
-				return 1; /* true */
+int user_table_update(struct user_table *table, const struct user *user)
+{
+	/* Cycle throught linked list to check if user is already part. */
+	for (struct user *p = table->start; p != NULL; p = p->next) {
+		if (memcmp(&p->addr, &user->addr, sizeof(user->addr)) == 0) {
+			/* Found! */
+			p->last_msg = user->last_msg;
+			/* TODO: More logic. */
+
+			return 0; /* Nothing more to do, just return 0. */
+		} else if (p->last_msg + table->timeout < time(NULL)) {
+			/* User timed out, remove p from list. */
+			if (p->prev != NULL && p->next != NULL) {
+				/* prev & next are not NULL. */
+				p->prev->next = p->next;
+				p->next->prev = p->prev;
+			} else if (p->prev != NULL) {
+				/* prev is not NULL, next is. */
+				p->prev->next = NULL;
+				table->end = p->prev;
+			} else if (p->next != NULL) {
+				/* prev is NULL, next is not. */
+				p->next->prev = NULL;
+				table->start = p->next;
+			} else {
+				/* p is only element, remove itself. */
+				table->start = NULL;
+				table->end = NULL;
 			}
-			++n;
+			memset(p, 0, sizeof(*p));
+			free(p);
 		}
-		n = 0;
 	}
-	/* Traverse the rest if needed. */
-	while (n < queue->stop) {
-		const struct chat_user *user1 = &queue->buffer[n % queue->cap];
-		if (memcmp(&user->addr, &user1->addr, sizeof(user->addr)) == 0) {
-			return 1; /* true */
-		}
-		++n;
-	}
-	return 0; /* false */
-}
 
-int chat_user_queue_push(struct chat_user_queue *queue,
-    const struct chat_user *user)
-{
-	if (queue->size >= queue->cap) {
-		return 1;
+	/* If not found, add user to end of list. */
+	struct user *user1 = malloc(sizeof(*user1));
+	if (user1 == NULL) return 1;
+
+	memcpy(user1, user, sizeof(*user));
+
+	if (table->start == NULL) {
+		/* start and end are NULL. */
+		table->start = user1;
+		table->end = user1;
+	} else {
+		/* start and end are not NULL. */
+		table->end->next = user1;
+		user1->prev = table->end;
 	}
-	size_t index = queue->stop;
-	queue->buffer[index] = *user;
-	queue->stop = (index + 1) % queue->cap;
-	queue->size++;
+
 	return 0;
 }
 
-int chat_user_queue_peek(const struct chat_user_queue *queue,
-    struct chat_user *user)
+int user_table_every(const struct user_table *table,
+    user_table_every_func_t func, void *args)
 {
-	if (queue->size == 0) {
-		return 1;
+	/* Cycle throught every element and call func with args. */
+	for (struct user *p = table->start; p != NULL; p = p->next) {
+		func(p, args);
 	}
-	*user = queue->buffer[queue->start];
+
 	return 0;
 }
 
-int chat_user_queue_pop(struct chat_user_queue *queue,
-    struct chat_user *user)
+void user_table_free(struct user_table *table)
 {
-	if (queue->size == 0) {
-		return 1;
+	/* Cycle throught and free all elements. */
+	for (struct user *p = table->start; p != NULL; p = p->next) {
+		/* Free previous elm, free self if last elm. */
+		if (p->prev != NULL) free(p->prev);
+		else if (p->next == NULL) free(p);
 	}
-	if (user != NULL)
-		*user = queue->buffer[queue->start];
-	queue->start = (queue->start + 1) % queue->cap;
-	queue->size--;
-	return 0;
-}
 
-int chat_user_queue_every(const struct chat_user_queue *queue,
-    chat_user_queue_every_func_t func, void *args)
-{
-	size_t n = queue->start;
-	/* If empty cancel. */
-	if (queue->size == 0) return 0;
-
-	/* If stop if before start go to the end of the buffer. */
-	if (queue->start >= queue->stop) {
-		while (n < queue->size) {
-			func(&queue->buffer[n % queue->cap], args);
-			++n;
-		}
-		n = 0;
-	}
-	/* Traverse the rest if needed. */
-	while (n < queue->stop) {
-		func(&queue->buffer[n % queue->cap], args);
-		++n;
-	}
-	return 0;
-}
-
-void chat_user_queue_free(struct chat_user_queue *queue)
-{
-	if (queue != NULL && queue->buffer != NULL)
-		cfree(queue->buffer);
+	memset(table, 0, sizeof(*table));
 }
