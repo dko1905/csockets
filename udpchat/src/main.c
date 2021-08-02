@@ -9,6 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <netdb.h>
 
@@ -35,7 +36,7 @@
 #endif
 #define PRINT_WRITE_MUTEX 1
 #include "util/print.h"
-/* = net =*/
+/* = net = */
 #ifndef MAX_BIND_COUNT
 /* Max count of interfaces to listen on. Normally only two are used. */
 #define MAX_BIND_COUNT (10)
@@ -53,7 +54,15 @@ static void *master_func(void *args);
 struct master_func_args {
 	int *sfd_arr;
 	size_t sfd_arr_len;
+	volatile bool *run;
 };
+/* On message handle.
+ *
+ * Returns:
+ * 0 - success
+ * 
+*/
+static int msg_handle(int sfd);
 
 int main(int argc, char *argv[])
 {
@@ -71,6 +80,9 @@ int main(int argc, char *argv[])
 	size_t sfd_arr_len = 0;
 	/* Args to master_func. */
 	struct master_func_args master_args = {0};
+	bool master_args_run = true;
+	/* Catch sigTERM and shutdown gracefully. */
+	sigset_t catchset = {0};
 
 	/* Set program name. */
 	progname = argv[0];
@@ -93,6 +105,26 @@ int main(int argc, char *argv[])
 	} else {
 		perror("Not enough arguments");
 		goto args_err;
+	}
+
+	/* Setup catchset. */
+	ret = sigemptyset(&catchset);
+	if (ret != 0) {
+		perror("Failed to setup catchset: %s", strerror(errno));
+		goto catchset_err;
+	}
+	ret = sigaddset(&catchset, SIGTERM);
+	ret += sigaddset(&catchset, SIGINT);
+	if (ret != 0) {
+		perror("Failed to add SIGTERM or SIGINT to catchset: %s",
+		    strerror(errno));
+		goto catchset_err;
+	}
+	ret = sigprocmask(SIG_BLOCK, &catchset, NULL);
+	if (ret != 0) {
+		perror("Failed to set block policy on SIGTERM or SIGINT: %s",
+		    strerror(errno));
+		goto catchset_err;
 	}
 
 	/* Create address info from provided infomation. */
@@ -160,12 +192,30 @@ int main(int argc, char *argv[])
 	/* Start master thread. */
 	master_args.sfd_arr = sfd_arr;
 	master_args.sfd_arr_len = sfd_arr_len;
+	master_args.run = &master_args_run; /* I think this makes it volatile. */
 	ret = pthread_create(&master_thread, NULL, master_func, &master_args);
 	if (ret != 0) {
 		perror("Failed to create master thread: %s", strerror(ret));
 		goto pthread_err;
 	}
 
+	/* Wait until main thread catches SIGINT or SIGTERM, and shutdown.
+	 * Using ret two times might be UB.
+	 */
+	ret = sigwait(&catchset, &ret);
+	if (ret != 0) {
+		pwarn("sigwait: %s", strerror(errno));
+	} else {
+		pdebug("sigwait: closing program nicely");
+	}
+
+	/* Set run to false, and shutdown all sockets. Shutting down the
+	 * sockets will send an event to poll which will shut down the thread.
+	 */
+	*master_args.run = false;
+	for (size_t n = 0; n < sfd_arr_len; ++n) {
+		shutdown(sfd_arr[n], SHUT_RDWR);
+	}
 	pthread_join(master_thread, NULL);
 pthread_err:
 	for (size_t n = 0; n < sfd_arr_len; ++n) {
@@ -174,6 +224,7 @@ pthread_err:
 socket_err:
 	freeaddrinfo(addr);
 addrinfo_err:
+catchset_err:
 args_err:
 	return status;
 }
@@ -181,19 +232,113 @@ args_err:
 
 static void *master_func(void *args0) {
 	struct master_func_args *args = (struct master_func_args *)args0;
+	/* Poll array to poll(3). */
 	struct pollfd poll_arr[MAX_BIND_COUNT] = {0};
-	char buffer[MAX_MSG_SIZE] = {0};
+	size_t poll_arr_len = 0;
+	/* General return from various functions. */
+	int ret = 0;
 
 	/* Fill poll array. */
 	for (size_t n = 0; n < args->sfd_arr_len && n < MAX_BIND_COUNT; ++n) {
 		poll_arr[n].fd = args->sfd_arr[n];
-		poll_arr[n].events = POLLIN | POLLPRI;
-		/* The rest is already 0. */
+		/* POLLERR & POLLHUP are not required, but added for compat. */
+		poll_arr[n].events = POLLIN | POLLPRI | POLLERR | POLLHUP;
+		/* Rest of element is 0. */
+		++poll_arr_len;
 	}
-	for (size_t n = args->sfd_arr_len; n < MAX_BIND_COUNT; ++n) {
+	for (size_t n = poll_arr_len; n < MAX_BIND_COUNT; ++n) {
 		poll_arr[n].fd = -1; /* poll **will** ignore under 0. */
-		/* The rest is already 0. */
+		/* Rest of element is 0. */
 	}
 
+	while (*args->run == true) {
+		/* Block until event arrives. */
+		ret = poll(poll_arr, poll_arr_len, -1);
+		if (ret == -1) {
+			if (errno == EINTR) {
+				pwarn("poll: Caught interrupt, continueing");
+				continue;
+			} else {
+				perror("poll: %s", strerror(errno));
+				goto poll_err;
+			}
+		} else if (ret == 0) {
+			pwarn("poll: Returned 0 even though timeout is inf");
+			continue;
+		}
+
+		/* Check for file descriptors with events. */
+		for (size_t n = 0; n < poll_arr_len; ++n) {
+			int sfd = poll_arr[n].fd;
+			/* Check for POLLIN,POLLPRI,POLLERR and POLLHUP. */
+			switch (poll_arr[n].revents) {
+			case POLLIN: /* FALLTHROUGH*/
+			case POLLPRI:
+				ret = msg_handle(sfd);
+				if (ret != 0) {
+					goto poll_err;
+				}
+				break;
+			case POLLERR:
+				perror("%d: POLLERR", sfd);
+				goto poll_err;
+			case POLLHUP:
+				if (*args->run != false) {
+					perror("%d: POLLHUP", sfd);
+				}
+				goto poll_err;
+			}
+		}
+	}
+
+	/* TODO: Free active client fds. */
+poll_err:
 	return NULL;
+}
+
+static int msg_handle(int sfd) {
+	int ret = 0, status = 0;
+	/* Receive buffer. */
+	char buffer[MAX_MSG_SIZE] = {0};
+	size_t buffer_len = 0;
+	struct sockaddr_storage peeraddr = {0};
+	socklen_t peeraddr_len = sizeof(peeraddr);
+
+	/* Read UDP packet. */
+	ret = recvfrom(sfd, buffer, sizeof(buffer), 0,
+	    (struct sockaddr *)&peeraddr, &peeraddr_len);
+	/* When ret is 0 either the datagram is 0
+	 * in size, or socket is closed. We will treat
+	 * it as a "0-datagram".
+	 */
+	if (ret == 0) {
+		/* Ignore zero len datagram. */
+#if PRINT_DEBUG == 1
+		pdebug("%d: recvfrom: 0-datagram", sfd);
+#endif
+		return 0;
+	} else if (ret == -1) {
+		/* Ignore theese errors. */
+		switch (errno) {
+		case EIO:
+		case ECONNRESET:
+		case EINTR:
+		case ETIMEDOUT:
+#if PRINT_DEBUG == 1
+			pdebug("%d: ignore error: %d",
+			    sfd, errno);
+#endif
+			return 0;
+		default:
+			perror("%d: recvfrom: %s", sfd, strerror(errno));
+			return 1;
+		}
+	} else {
+		buffer_len = ret;
+	}
+	/* Successfully read message into buffer and peer address into peeraddr. */
+	ret = sendto(sfd, buffer, buffer_len, 0, (void *)&peeraddr,
+	    peeraddr_len);
+
+	return 0;
 }
