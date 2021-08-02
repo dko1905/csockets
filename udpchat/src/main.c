@@ -11,7 +11,6 @@
 #include <unistd.h>
 #include <signal.h>
 
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netdb.h>
@@ -63,7 +62,7 @@ struct master_func_args {
  *
  * Returns:
  * 0 - success
- * 
+ * 1 - error
 */
 static int msg_handle(int sfd);
 
