@@ -297,7 +297,7 @@ poll_err:
 }
 
 static int msg_handle(int sfd) {
-	int ret = 0, status = 0;
+	int ret = 0;
 	/* Receive buffer. */
 	char buffer[MAX_MSG_SIZE] = {0};
 	size_t buffer_len = 0;
@@ -337,8 +337,18 @@ static int msg_handle(int sfd) {
 		buffer_len = ret;
 	}
 	/* Successfully read message into buffer and peer address into peeraddr. */
-	ret = sendto(sfd, buffer, buffer_len, 0, (void *)&peeraddr,
+	ssize_t sendto_ret = sendto(sfd, buffer, buffer_len, 0, (void *)&peeraddr,
 	    peeraddr_len);
+	if (sendto_ret < 1) {
+		perror("%d: sendto: %s", sfd, strerror(errno));
+	} else if (sendto_ret != (ssize_t)buffer_len) {
+		perror("%d: Message cut short (%zd of %zd)", sfd, sendto_ret,
+		    buffer_len);
+	} else {
+#if PRINT_DEBUG == 1
+		pdebug("%d: Sent %zd bytes", sfd, sendto_ret)
+#endif
+	}
 
 	return 0;
 }
