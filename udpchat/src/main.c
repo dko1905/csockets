@@ -414,13 +414,16 @@ static void timeout_func(const struct user *user, void *args0)
 	(void)args; /* We don't use it yet. */
 	send_buffer = msg_formatter(0, user->id, MSG_USR_TIMEOUT_STR,
 	    &send_buffer_len);
-	bytes = sendto(user->recv_fd, send_buffer, send_buffer_len, 0,
-	    (void *)&user->addr, user->addr_len);
-	if (bytes < 1) {
-		perror("%d: sendto (%s): %s", user->recv_fd,
-		    addr2str(user->addr_family, (void *)&user->addr),
-		    strerror(errno));
-		return;
+
+	for (size_t n = 0; n < MSG_USR_TIMEOUT_COUNT; ++n) {
+		bytes = sendto(user->recv_fd, send_buffer, send_buffer_len, 0,
+		    (void *)&user->addr, user->addr_len);
+		if (bytes < 1) {
+			perror("%d: sendto (%s): %s", user->recv_fd,
+			    addr2str(user->addr_family, (void *)&user->addr),
+			    strerror(errno));
+			return;
+		}
 	}
 	/* Print debugging infomation. */
 	pdebug("%d: sendto (%s): %zd bytes", user->recv_fd,

@@ -57,7 +57,7 @@
 #ifndef MSG_USR_TIMEOUT
 #define MSG_USR_TIMEOUT (1)
 #define MSG_USR_TIMEOUT_STR "TIMEOUT: please send any message to join again."
-#define MSG_USR_TIMEOUT_COUNT (2)
+#define MSG_USR_TIMEOUT_COUNT (3)
 #endif
 
 #endif
