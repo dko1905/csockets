@@ -50,7 +50,7 @@
 #endif
 #ifndef ACTUSER_TIMEOUT
 /* Timeout before removeing user from active users (in seconds). */
-#define ACTUSER_TIMEOUT (7)
+#define ACTUSER_TIMEOUT (300)
 #endif
 
 /* == Globals == */
