@@ -1,7 +1,9 @@
 #ifndef UTIL_NET_H
 #define UTIL_NET_H
 #include <sys/socket.h> /* sockaddr */
-#include <netdb.h> /* addrinfo */
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* Convert sockaddr into human readable string. The string is stored in static
  * memory, and will be overwritten on the next call. This function is thread-

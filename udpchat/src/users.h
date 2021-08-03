@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <time.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 struct user {
 	/* Address of client. */
