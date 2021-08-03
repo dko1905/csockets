@@ -26,7 +26,7 @@
 /* = Logging = */
 /* Controls wether the log* functions print anything. */
 #ifndef PRINT_DEBUG
-#define PRINT_DEBUG (0)
+#define PRINT_DEBUG (1)
 #endif
 #ifndef PRINT_INFO
 #define PRINT_INFO (1)
