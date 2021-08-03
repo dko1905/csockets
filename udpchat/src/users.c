@@ -28,49 +28,53 @@ int user_table_init(struct user_table *table, time_t timeout)
 int user_table_update(struct user_table *table, const struct user *user,
     user_table_timeout_func_t timeout_func, void *timeout_func_args)
 {
-	struct user *tmp = NULL;
+	struct user *p = table->start, *tmp = NULL;
 
 	/* Cycle throught linked list to check if user is already part. */
-	for (struct user *p = table->start; p != NULL;) {
-		if (sockaddr_cmp(&p->addr, &user->addr, p->addr_len) == 0) {
-			/* Found! */
-			p->last_msg = user->last_msg;
-			p->recv_fd = user->recv_fd;
+	while (p != NULL && p->next != NULL) {
+		tmp = p;
+		p = p->next;
 
-			return 0; /* Nothing more to do, just return 0. */
-		} else if (p->last_msg + table->timeout < time(NULL)) {
-			/* User timed out, remove p from list. */
-			if (p->prev != NULL && p->next != NULL) {
+		if (sockaddr_cmp(&tmp->addr, &user->addr, tmp->addr_len) == 0) {
+			/* Found! */
+			tmp->last_msg = user->last_msg;
+			tmp->recv_fd = user->recv_fd;
+			tmp->id = user->id;
+
+			return 0;
+		} else if (tmp->last_msg + table->timeout < time(NULL)) {
+			/* Call timeout_func before deleting. */
+			timeout_func(tmp, timeout_func_args);
+
+			/* Remove tmp from list. */
+			if (tmp->prev != NULL && tmp->next != NULL) {
 				/* prev & next are not NULL. */
-				p->prev->next = p->next;
-				p->next->prev = p->prev;
-			} else if (p->prev != NULL) {
+				tmp->prev->next = tmp->next;
+				tmp->next->prev = tmp->prev;
+			} else if (tmp->prev != NULL) {
 				/* prev is not NULL, next is. */
-				p->prev->next = NULL;
-				table->end = p->prev;
-			} else if (p->next != NULL) {
+				tmp->prev->next = NULL;
+				table->end = tmp->prev;
+			} else if (tmp->next != NULL) {
 				/* prev is NULL, next is not. */
-				p->next->prev = NULL;
-				table->start = p->next;
+				tmp->next->prev = NULL;
+				table->start = tmp->next;
 			} else {
-				/* p is only element, remove itself. */
+				/*  is only element, remove itself. */
 				table->start = NULL;
 				table->end = NULL;
 			}
-			/* Call timeout func before freeing. */
-			if (timeout_func != NULL)
-				timeout_func(p, timeout_func_args);
 
-			/* Store node to delete in tmp, and change current node
-			 * to next, and then free tmp.
-			 */
-			tmp = p;
-			p = p->next;
 			memset(tmp, 0, sizeof(*tmp));
 			free(tmp);
-		} else {
-			p = p->next;
 		}
+	}
+	if (p != NULL && sockaddr_cmp(&p->addr, &user->addr, p->addr_len) == 0) {
+		p->last_msg = user->last_msg;
+		p->recv_fd = user->recv_fd;
+		p->id = user->id;
+
+		return 0;
 	}
 
 	/* If not found, add user to end of list. */
@@ -138,6 +142,9 @@ uint16_t user_calculate_id(const struct user *user)
 		id += ip_buffer[2];
 		id += ip_buffer[3];
 
+		id %= 999;
+		if (id == 0) id = 999;
+
 		return id;
 	} else if (user->addr_family == AF_INET6) {
 		const struct sockaddr_in6 *sock6 = (void *)&user->addr;
@@ -149,6 +156,9 @@ uint16_t user_calculate_id(const struct user *user)
 			if (n % 2 == 1)
 				id %= 997;
 		}
+
+		id %= 999;
+		if (id == 0) id = 999;
 
 		return id;
 	} else {
