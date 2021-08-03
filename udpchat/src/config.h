@@ -45,7 +45,7 @@
 #endif
 /* Max length of message body. */
 #ifndef MSG_BODY_LEN
-#define MSG_BODY_LEN (50)
+#define MSG_BODY_LEN (127)
 #endif
 /* Total length of */
 #ifndef MSG_TOTAL_LEN
