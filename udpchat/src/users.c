@@ -5,6 +5,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "util/net.h"
+
 /* Allow for custom allocators. */
 #ifndef cmalloc
 #define cmalloc malloc
@@ -15,22 +17,20 @@
 
 int user_table_init(struct user_table *table, time_t timeout)
 {
+	memset(table, 0, sizeof(*table));
 	table->timeout = timeout;
-	table->start = NULL;
-	table->end = NULL;
 
 	return 0;
 }
 
-
 int user_table_update(struct user_table *table, const struct user *user)
 {
 	/* Cycle throught linked list to check if user is already part. */
-	for (struct user *p = table->start; p != NULL; p = p->next) {
-		if (memcmp(&p->addr, &user->addr, sizeof(user->addr)) == 0) {
+	for (struct user *p = table->start; p != NULL;) {
+		if (sockaddr_cmp(&p->addr, &user->addr, p->addr_len) == 0) {
 			/* Found! */
 			p->last_msg = user->last_msg;
-			/* TODO: More logic. */
+			p->recv_sfd = user->recv_sfd;
 
 			return 0; /* Nothing more to do, just return 0. */
 		} else if (p->last_msg + table->timeout < time(NULL)) {
@@ -52,8 +52,14 @@ int user_table_update(struct user_table *table, const struct user *user)
 				table->start = NULL;
 				table->end = NULL;
 			}
-			memset(p, 0, sizeof(*p));
-			free(p);
+			struct user *tmp = p;
+
+			p = p->next;
+
+			memset(tmp, 0, sizeof(*tmp));
+			free(tmp);
+		} else {
+			p = p->next;
 		}
 	}
 
@@ -71,6 +77,7 @@ int user_table_update(struct user_table *table, const struct user *user)
 		/* start and end are not NULL. */
 		table->end->next = user1;
 		user1->prev = table->end;
+		table->end = user1;
 	}
 
 	return 0;
@@ -90,10 +97,18 @@ int user_table_every(const struct user_table *table,
 void user_table_free(struct user_table *table)
 {
 	/* Cycle throught and free all elements. */
-	for (struct user *p = table->start; p != NULL; p = p->next) {
+	for (struct user *p = table->start; p != NULL;) {
 		/* Free previous elm, free self if last elm. */
-		if (p->prev != NULL) free(p->prev);
-		else if (p->next == NULL) free(p);
+		if (p->prev != NULL) {
+			memset(p->prev, 0, sizeof(*p->prev));
+			free(p->prev);
+
+			p = p->next;
+		} else if (p->next == NULL) {
+			memset(p, 0, sizeof(*p));
+			free(p);
+			break;
+		}
 	}
 
 	memset(table, 0, sizeof(*table));

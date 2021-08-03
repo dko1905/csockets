@@ -3,7 +3,10 @@
 
 #include <stddef.h>
 #include <errno.h>
+#include <string.h>
+#include <unistd.h>
 
+#include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -84,4 +87,56 @@ int create_addrinfo(const char *port, const char **bind_ips,
 
 getaddrinfo_err:
 	return status;
+}
+
+/* Copyright (C) 2013 - 2015, Max Lv <max.c.lv@gmail.com>
+ *
+ * This function is part of the shadowsocks-libev.
+ *
+ * shadowsocks-libev is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * shadowsocks-libev is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with shadowsocks-libev; see the file COPYING. If not, see
+ * <http://www.gnu.org/licenses/>.
+ */
+int sockaddr_cmp(const struct sockaddr_storage* addr1,
+    const struct sockaddr_storage* addr2, socklen_t len)
+{
+	const struct sockaddr_in* p1_in = (const struct sockaddr_in*)addr1;
+	const struct sockaddr_in* p2_in = (const struct sockaddr_in*)addr2;
+	const struct sockaddr_in6* p1_in6 = (const struct sockaddr_in6*)addr1;
+	const struct sockaddr_in6* p2_in6 = (const struct sockaddr_in6*)addr2;
+	if( p1_in->sin_family < p2_in->sin_family)
+		return -1;
+	if( p1_in->sin_family > p2_in->sin_family)
+		return 1;
+	/* compare ip4 */
+	if( p1_in->sin_family == AF_INET ) {
+		/* just order it, ntohs not required */
+		if(p1_in->sin_port < p2_in->sin_port)
+			return -1;
+		if(p1_in->sin_port > p2_in->sin_port)
+			return 1;
+		return memcmp(&p1_in->sin_addr, &p2_in->sin_addr,
+		    sizeof(struct sockaddr_in));
+	} else if (p1_in6->sin6_family == AF_INET6) {
+		/* just order it, ntohs not required */
+		if(p1_in6->sin6_port < p2_in6->sin6_port)
+			return -1;
+		if(p1_in6->sin6_port > p2_in6->sin6_port)
+			return 1;
+		return memcmp(&p1_in6->sin6_addr, &p2_in6->sin6_addr,
+		    sizeof(struct sockaddr_in6));
+	} else {
+		/* eek unknown type, perform this comparison for sanity. */
+		return memcmp(addr1, addr2, len);
+	}
 }

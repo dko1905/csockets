@@ -50,7 +50,7 @@
 #endif
 #ifndef ACTUSER_TIMEOUT
 /* Timeout before removeing user from active users (in seconds). */
-#define ACTUSER_TIMEOUT (3000)
+#define ACTUSER_TIMEOUT (7)
 #endif
 
 /* == Globals == */
@@ -61,7 +61,6 @@ static void *master_func(void *args);
 struct master_func_args {
 	int *sfd_arr;
 	size_t sfd_arr_len;
-	int send_fd4, send_fd6;
 	volatile bool *run;
 };
 /* On message handle.
@@ -70,13 +69,11 @@ struct master_func_args {
  * 0 - success
  * 1 - error
 */
-static int msg_handle(int sfd, struct master_func_args *mf_args,
-    struct user_table *active_users);
+static int msg_handle(int sfd, struct user_table *active_users);
 /* sendall_func is called by user_table_every to send message to other users. */
 static void sendall_func(const struct user *user, void *args0);
 struct sendall_func_args {
 	int sfd;
-	int send_fd4, send_fd6;
 	char *buffer;
 	size_t buffer_len;
 };
@@ -95,7 +92,6 @@ int main(int argc, char *argv[])
 	/* Array of bound sockets. */
 	int sfd_arr[MAX_BIND_COUNT] = {0};
 	size_t sfd_arr_len = 0;
-	int send_fd4 = 0, send_fd6 = 0;
 	/* Args to master_func. */
 	struct master_func_args master_args = {0};
 	bool master_args_run = true;
@@ -145,19 +141,6 @@ int main(int argc, char *argv[])
 		goto catchset_err;
 	}
 
-	/* Create send_fd4 & 6. */
-	ret = socket(AF_INET, SOCK_DGRAM, 0);
-	if (ret < 0) {
-		perror("Failed to setup send_fd4: %s", strerror(errno));
-		goto send_fd4_err;
-	}
-	send_fd4 = ret;
-	ret = socket(AF_INET6, SOCK_DGRAM, 0);
-	if (ret < 0) {
-		perror("Failed to setup send_fd6: %s", strerror(errno));
-		goto send_fd6_err;
-	}
-	send_fd6 = ret;
 
 	/* Create address info from provided infomation. */
 	ret = create_addrinfo(port, (const char **)bind_ips, bind_ips_len,
@@ -224,8 +207,6 @@ int main(int argc, char *argv[])
 	/* Start master thread. */
 	master_args.sfd_arr = sfd_arr;
 	master_args.sfd_arr_len = sfd_arr_len;
-	master_args.send_fd4 = send_fd4;
-	master_args.send_fd6 = send_fd6;
 	master_args.run = &master_args_run; /* I think this makes it volatile. */
 	ret = pthread_create(&master_thread, NULL, master_func, &master_args);
 	if (ret != 0) {
@@ -258,10 +239,6 @@ pthread_err:
 socket_err:
 	freeaddrinfo(addr);
 addrinfo_err:
-	close(send_fd6);
-send_fd6_err:
-	close(send_fd4);
-send_fd4_err:
 catchset_err:
 args_err:
 	return status;
@@ -321,7 +298,7 @@ static void *master_func(void *args0)
 			switch (poll_arr[n].revents) {
 			case POLLIN: /* FALLTHROUGH*/
 			case POLLPRI:
-				ret = msg_handle(sfd, args, &active_users);
+				ret = msg_handle(sfd, &active_users);
 				if (ret != 0) {
 					goto poll_err;
 				}
@@ -344,8 +321,7 @@ user_queue_err:
 	return NULL;
 }
 
-static int msg_handle(int sfd, struct master_func_args *mf_args,
-    struct user_table *active_users)
+static int msg_handle(int sfd, struct user_table *active_users)
 {
 	int ret = 0;
 	struct sendall_func_args sendall_args = {0};
@@ -389,13 +365,23 @@ static int msg_handle(int sfd, struct master_func_args *mf_args,
 	} else {
 		buffer_len = ret;
 	}
-	/* Create user and add to table (will allocate on heap). */
 #if PRINT_DEBUG == 1
-	pdebug("recv from '%s'", addr2str(AF_INET, (void *)&peeraddr));
+	if (peeraddr_len == sizeof(struct sockaddr_in)) {
+		pdebug("%d: recvfrom (%s): %zd bytes", sfd,
+		    addr2str(AF_INET, (void *)&peeraddr),
+		    buffer_len);
+	} else {
+		pdebug("%d: recvfrom (%s): %zd bytes", sfd,
+		    addr2str(AF_INET6, (void *)&peeraddr),
+		    buffer_len);
+	}
 #endif
+	/* Create user and add to table (will allocate on heap). */
 	user.addr = peeraddr;
 	user.addr_len = peeraddr_len;
 	user.messages_in5s = 0;
+	user.recv_sfd = sfd;
+	user.last_msg = time(NULL);
 
 	ret = user_table_update(active_users, &user);
 	if (ret != 0) {
@@ -407,8 +393,6 @@ static int msg_handle(int sfd, struct master_func_args *mf_args,
 	sendall_args.buffer = buffer;
 	sendall_args.buffer_len = buffer_len;
 	sendall_args.sfd = sfd;
-	sendall_args.send_fd4 = mf_args->send_fd4;
-	sendall_args.send_fd6 = mf_args->send_fd6;
 	user_table_every(active_users, sendall_func, &sendall_args);
 
 	return 0;
@@ -419,7 +403,7 @@ static void sendall_func(const struct user *user, void *args0) {
 	ssize_t bytes = 0;
 
 	if (user->addr_len == sizeof(struct sockaddr_in)) {
-		bytes = sendto(args->send_fd4, args->buffer, args->buffer_len,
+		bytes = sendto(user->recv_sfd, args->buffer, args->buffer_len,
 		    0, (void *)&user->addr, user->addr_len);
 		if (bytes < 1) {
 			perror("%d: sendto (%s): %s", args->sfd,
@@ -433,7 +417,7 @@ static void sendall_func(const struct user *user, void *args0) {
 #endif
 		}
 	} else {
-		bytes = sendto(args->send_fd6, args->buffer, args->buffer_len,
+		bytes = sendto(user->recv_sfd, args->buffer, args->buffer_len,
 		    0, (void *)&user->addr, user->addr_len);
 		if (bytes < 1) {
 			perror("%d: sendto (%s): %s", args->sfd,

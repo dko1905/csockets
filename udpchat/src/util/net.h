@@ -20,4 +20,10 @@ const char *addr2str(int _af, const struct sockaddr *_src);
 int create_addrinfo(const char *_port, const char **_bind_ips,
     size_t _bind_ips_len, struct addrinfo **_addr);
 
+/* Compare two sockaddrs. Will also compare port.
+ * Returns 0 if addr1 == addr2. -1 if addr1 is smaller, +1 if larger.
+ */
+int sockaddr_cmp(const struct sockaddr_storage* _addr1,
+    const struct sockaddr_storage* _addr2, socklen_t _len);
+
 #endif /* UTIL_NET_H */
