@@ -356,13 +356,18 @@ static int msg_handle(int sfd, struct user_table *active_users)
 	user.id = user_calculate_id(&user);
 	user.recv_fd = sfd;
 	user.last_msg = time(NULL);
+	user.last_msg_xs = (user.last_msg / 2) * 2; /* Round. */
 	/* Print debug infomation. */
 	pdebug("%d: recvfrom (%s): %zd bytes", sfd,
 	    addr2str(user.addr_family, (void *)&user.addr),
 	    buffer_len);
 
 	ret = user_table_update(active_users, &user, timeout_func, NULL);
-	if (ret != 0) {
+	if (ret == 1) {
+		pdebug("%d: spam-detected (%s)", sfd,
+		    addr2str(user.addr_family, (void *)&user.addr));
+		return 0;
+	} else if (ret > 1) {
 		perror("Failed to update active user table: %s",
 		    strerror(errno));
 		return 1;

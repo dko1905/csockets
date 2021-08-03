@@ -9,14 +9,6 @@
 
 #include "util/net.h"
 
-/* Allow for custom allocators. */
-#ifndef cmalloc
-#define cmalloc malloc
-#endif
-#ifndef cfree
-#define cfree free
-#endif
-
 int user_table_init(struct user_table *table, time_t timeout)
 {
 	memset(table, 0, sizeof(*table));
@@ -37,7 +29,11 @@ int user_table_update(struct user_table *table, const struct user *user,
 
 		if (sockaddr_cmp(&tmp->addr, &user->addr, tmp->addr_len) == 0) {
 			/* Found! */
-			tmp->last_msg = user->last_msg;
+			if (tmp->last_msg == user->last_msg) return 1;
+			if (tmp->last_msg_xs == user->last_msg_xs) return 1;
+			/* If we don't update last_msg, they will time out. */
+			/*tmp->last_msg = user->last_msg;*/
+			tmp->last_msg_xs = user->last_msg_xs;
 			tmp->recv_fd = user->recv_fd;
 			tmp->id = user->id;
 
@@ -70,7 +66,12 @@ int user_table_update(struct user_table *table, const struct user *user,
 		}
 	}
 	if (p != NULL && sockaddr_cmp(&p->addr, &user->addr, p->addr_len) == 0) {
-		p->last_msg = user->last_msg;
+		/* Found! */
+		if (p->last_msg == user->last_msg) return 1;
+		if (p->last_msg_xs == user->last_msg_xs) return 1;
+		/* If we don't update last_msg, they will time out. */
+		/*p->last_msg = p->last_msg;*/
+		p->last_msg_xs = user->last_msg_xs;
 		p->recv_fd = user->recv_fd;
 		p->id = user->id;
 

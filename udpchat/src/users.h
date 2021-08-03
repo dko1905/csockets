@@ -17,7 +17,8 @@ struct user {
 	uint16_t id; /* 16 bit id. */
 
 	/* Throatteling infomation. */
-	time_t last_msg; /* used to kick users. */
+	time_t last_msg; /* used for timeout. */
+	time_t last_msg_xs; /* used for anti spam */
 
 	/* Linked list infomation. */
 	struct user *next;
@@ -33,7 +34,9 @@ typedef void (*user_table_every_func_t)(const struct user *, void *);
 typedef void (*user_table_timeout_func_t)(const struct user *, void *);
 
 int user_table_init(struct user_table *_table, time_t _timeout);
-/* Used to keep user in table, will also kick timeed out users. */
+/* Used to keep user in table, will also kick timeed out users.
+ * Return 1 when spam is detected.
+ */
 int user_table_update(struct user_table *_table, const struct user *_user,
     user_table_timeout_func_t _timeout_func, void *_timeout_func_args);
 int user_table_every(const struct user_table *_table,
