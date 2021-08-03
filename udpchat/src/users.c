@@ -30,7 +30,7 @@ int user_table_update(struct user_table *table, const struct user *user)
 		if (sockaddr_cmp(&p->addr, &user->addr, p->addr_len) == 0) {
 			/* Found! */
 			p->last_msg = user->last_msg;
-			p->recv_sfd = user->recv_sfd;
+			p->recv_fd = user->recv_fd;
 
 			return 0; /* Nothing more to do, just return 0. */
 		} else if (p->last_msg + table->timeout < time(NULL)) {

@@ -9,15 +9,15 @@
 
 struct user {
 	/* Address of client. */
-	struct sockaddr_storage addr;
-	socklen_t addr_len;
-	int recv_sfd;
+	struct sockaddr_storage addr; /* Client address. */
+	socklen_t addr_len; /* Client address lenhgt.*/
+	int addr_family; /* Client address family. */
+	int recv_fd; /* Receive file descriptor. */
 
 	/* Throatteling infomation. */
-	int messages_in5s; /* Messages sent in last 5 seconds. */
 	time_t last_msg; /* used to kick users. */
 
-	/* Private infomation. */
+	/* Linked list infomation. */
 	struct user *next;
 	struct user *prev;
 };

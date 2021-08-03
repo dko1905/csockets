@@ -26,7 +26,7 @@
 /* = Logging = */
 /* Controls wether the log* functions print anything. */
 #ifndef PRINT_DEBUG
-#define PRINT_DEBUG (1)
+#define PRINT_DEBUG (0)
 #endif
 #ifndef PRINT_INFO
 #define PRINT_INFO (1)
@@ -189,6 +189,7 @@ int main(int argc, char *argv[])
 		}
 		pdebug("Bound '%s' to %i", addr2str(ca->ai_family, ca->ai_addr),
 		    sfd);
+		pinfo("Bound %s:%s", addr2str(ca->ai_family, ca->ai_addr), port);
 
 		/* Add socket to array of bound sockets. */
 		if (sfd_arr_len >= MAX_BIND_COUNT) {
@@ -221,7 +222,7 @@ int main(int argc, char *argv[])
 	if (ret != 0) {
 		pwarn("sigwait: %s", strerror(errno));
 	} else {
-		pdebug("sigwait: closing program nicely");
+		pinfo("sigwait: closing program nicely");
 	}
 
 	/* Set run to false, and shutdown all sockets. Shutting down the
@@ -300,6 +301,7 @@ static void *master_func(void *args0)
 			case POLLPRI:
 				ret = msg_handle(sfd, &active_users);
 				if (ret != 0) {
+					perror("msg_handle error");
 					goto poll_err;
 				}
 				break;
@@ -342,9 +344,7 @@ static int msg_handle(int sfd, struct user_table *active_users)
 	 */
 	if (ret == 0) {
 		/* Ignore zero len datagram. */
-#if PRINT_DEBUG == 1
 		pdebug("%d: recvfrom: 0-datagram", sfd);
-#endif
 		return 0;
 	} else if (ret == -1) {
 		/* Ignore theese errors. */
@@ -353,10 +353,8 @@ static int msg_handle(int sfd, struct user_table *active_users)
 		case ECONNRESET:
 		case EINTR:
 		case ETIMEDOUT:
-#if PRINT_DEBUG == 1
 			pdebug("%d: ignore error: %d",
 			    sfd, errno);
-#endif
 			return 0;
 		default:
 			perror("%d: recvfrom: %s", sfd, strerror(errno));
@@ -365,23 +363,24 @@ static int msg_handle(int sfd, struct user_table *active_users)
 	} else {
 		buffer_len = ret;
 	}
-#if PRINT_DEBUG == 1
-	if (peeraddr_len == sizeof(struct sockaddr_in)) {
-		pdebug("%d: recvfrom (%s): %zd bytes", sfd,
-		    addr2str(AF_INET, (void *)&peeraddr),
-		    buffer_len);
-	} else {
-		pdebug("%d: recvfrom (%s): %zd bytes", sfd,
-		    addr2str(AF_INET6, (void *)&peeraddr),
-		    buffer_len);
-	}
-#endif
 	/* Create user and add to table (will allocate on heap). */
 	user.addr = peeraddr;
 	user.addr_len = peeraddr_len;
-	user.messages_in5s = 0;
-	user.recv_sfd = sfd;
+	if (peeraddr_len == sizeof(struct sockaddr_in))
+		user.addr_family = AF_INET;
+	else if (peeraddr_len == sizeof(struct sockaddr_in6))
+		user.addr_family = AF_INET6;
+	else {
+		perror("%d: recvfrom (?): Unknown family (%d socklen)", sfd,
+		    peeraddr_len);
+		return 1;
+	}
+	user.recv_fd = sfd;
 	user.last_msg = time(NULL);
+	/* Print debug infomation. */
+	pdebug("%d: recvfrom (%s): %zd bytes", sfd,
+	    addr2str(user.addr_family, (void *)&user.addr),
+	    buffer_len);
 
 	ret = user_table_update(active_users, &user);
 	if (ret != 0) {
@@ -402,33 +401,15 @@ static void sendall_func(const struct user *user, void *args0) {
 	struct sendall_func_args *args = args0;
 	ssize_t bytes = 0;
 
-	if (user->addr_len == sizeof(struct sockaddr_in)) {
-		bytes = sendto(user->recv_sfd, args->buffer, args->buffer_len,
-		    0, (void *)&user->addr, user->addr_len);
-		if (bytes < 1) {
-			perror("%d: sendto (%s): %s", args->sfd,
-			    addr2str(AF_INET, (void *)&user->addr),
-			    strerror(errno));
-		} else {
-#if PRINT_DEBUG == 1
-			pdebug("%d: sendto (%s): %zd bytes", args->sfd,
-			    addr2str(AF_INET, (void *)&user->addr),
-			    bytes);
-#endif
-		}
-	} else {
-		bytes = sendto(user->recv_sfd, args->buffer, args->buffer_len,
-		    0, (void *)&user->addr, user->addr_len);
-		if (bytes < 1) {
-			perror("%d: sendto (%s): %s", args->sfd,
-			    addr2str(AF_INET6, (void *)&user->addr),
-			    strerror(errno));
-		} else {
-#if PRINT_DEBUG == 1
-			pdebug("%d: sendto (%s): %zd bytes", args->sfd,
-			    addr2str(AF_INET6, (void *)&user->addr),
-			    bytes);
-#endif
-		}
+	bytes = sendto(user->recv_fd, args->buffer, args->buffer_len, 0,
+	    (void *)&user->addr, user->addr_len);
+	if (bytes < 1) {
+		perror("%d: sendto (%s): %s", args->sfd,
+		    addr2str(user->addr_family, (void *)&user->addr),
+		    strerror(errno));
+		return;
 	}
+	/* Print debugging infomation. */
+	pdebug("%d: sendto (%s): %zd bytes", args->sfd,
+	    addr2str(user->addr_family, (void *)&user->addr), bytes);
 }
