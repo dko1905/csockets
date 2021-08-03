@@ -107,20 +107,17 @@ int user_table_every(const struct user_table *table,
 
 void user_table_free(struct user_table *table)
 {
-	/* Cycle throught and free all elements. */
-	for (struct user *p = table->start; p != NULL;) {
-		/* Free previous elm, free self if last elm. */
-		if (p->prev != NULL) {
-			memset(p->prev, 0, sizeof(*p->prev));
-			free(p->prev);
+	struct user *prev = table->start, *tmp = NULL;
 
-			p = p->next;
-		} else if (p->next == NULL) {
-			memset(p, 0, sizeof(*p));
-			free(p);
-			break;
-		}
+	while (prev->next != NULL) {
+		tmp = prev;
+		prev = prev->next;
+
+		memset(tmp, 0, sizeof(*tmp));
+		free(tmp);
 	}
+	memset(prev, 0, sizeof(*prev));
+	free(prev);
 
 	memset(table, 0, sizeof(*table));
 }
