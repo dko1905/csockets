@@ -15,9 +15,8 @@ const char *msg_formatter(uint16_t sender_id, uint16_t receiver_id,
     const char *body, size_t *len)
 {
 	size_t free = 0;
+	(void)receiver_id;
 
-	// if (sender_id != receiver_id)
-	// 	return_buffer[free++] = '\n';
 	if (body != NULL) {
 		/* Copy id to start of buffer without terminator. */
 		snprintf(id_buffer, sizeof(id_buffer), "%3" PRIu16,
