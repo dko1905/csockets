@@ -108,7 +108,7 @@ pthread_mutex_t _print_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 #if PRINT_INFO == 1
 #define pinfo(...) {\
 	pthread_mutex_lock(&_print_write_mutex);\
-	print_printf(PRINT_DEBUG_PREFIX);\
+	print_printf(PRINT_INFO_PREFIX);\
 	print_printf(__VA_ARGS__);\
 	print_printf("\n");\
 	pthread_mutex_unlock(&_print_write_mutex);\
