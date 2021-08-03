@@ -23,8 +23,11 @@ int user_table_init(struct user_table *table, time_t timeout)
 	return 0;
 }
 
-int user_table_update(struct user_table *table, const struct user *user)
+int user_table_update(struct user_table *table, const struct user *user,
+    user_table_timeout_func_t timeout_func, void *timeout_func_args)
 {
+	struct user *tmp = NULL;
+
 	/* Cycle throught linked list to check if user is already part. */
 	for (struct user *p = table->start; p != NULL;) {
 		if (sockaddr_cmp(&p->addr, &user->addr, p->addr_len) == 0) {
@@ -52,10 +55,15 @@ int user_table_update(struct user_table *table, const struct user *user)
 				table->start = NULL;
 				table->end = NULL;
 			}
-			struct user *tmp = p;
+			/* Call timeout func before freeing. */
+			if (timeout_func != NULL)
+				timeout_func(p, timeout_func_args);
 
+			/* Store node to delete in tmp, and change current node
+			 * to next, and then free tmp.
+			 */
+			tmp = p;
 			p = p->next;
-
 			memset(tmp, 0, sizeof(*tmp));
 			free(tmp);
 		} else {
@@ -64,31 +72,32 @@ int user_table_update(struct user_table *table, const struct user *user)
 	}
 
 	/* If not found, add user to end of list. */
-	struct user *user1 = malloc(sizeof(*user1));
-	if (user1 == NULL) return 1;
-
-	memcpy(user1, user, sizeof(*user));
+	tmp = malloc(sizeof(*tmp));
+	if (tmp == NULL) return 1;
+	memcpy(tmp, user, sizeof(*tmp));
 
 	if (table->start == NULL) {
 		/* start and end are NULL. */
-		table->start = user1;
-		table->end = user1;
+		table->start = tmp;
+		table->end = tmp;
 	} else {
 		/* start and end are not NULL. */
-		table->end->next = user1;
-		user1->prev = table->end;
-		table->end = user1;
+		table->end->next = tmp;
+		tmp->prev = table->end;
+		table->end = tmp;
 	}
 
 	return 0;
 }
 
 int user_table_every(const struct user_table *table,
-    user_table_every_func_t func, void *args)
+    user_table_every_func_t every_func, void *every_func_args)
 {
+	assert(every_func != NULL);
+
 	/* Cycle throught every element and call func with args. */
 	for (struct user *p = table->start; p != NULL; p = p->next) {
-		func(p, args);
+		every_func(p, every_func_args);
 	}
 
 	return 0;

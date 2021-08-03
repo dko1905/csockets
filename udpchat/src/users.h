@@ -28,12 +28,14 @@ struct user_table {
 };
 
 typedef void (*user_table_every_func_t)(const struct user *, void *);
+typedef void (*user_table_timeout_func_t)(const struct user *, void *);
 
 int user_table_init(struct user_table *_table, time_t _timeout);
 /* Used to keep user in table, will also kick timeed out users. */
-int user_table_update(struct user_table *_table, const struct user *_user);
+int user_table_update(struct user_table *_table, const struct user *_user,
+    user_table_timeout_func_t _timeout_func, void *_timeout_func_args);
 int user_table_every(const struct user_table *_table,
-    user_table_every_func_t _func, void *args);
+    user_table_every_func_t _every_func, void *_every_func_args);
 void user_table_free(struct user_table *_table);
 
 #endif

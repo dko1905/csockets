@@ -382,7 +382,7 @@ static int msg_handle(int sfd, struct user_table *active_users)
 	    addr2str(user.addr_family, (void *)&user.addr),
 	    buffer_len);
 
-	ret = user_table_update(active_users, &user);
+	ret = user_table_update(active_users, &user, NULL, NULL);
 	if (ret != 0) {
 		perror("Failed to update active user table: %s",
 		    strerror(errno));
