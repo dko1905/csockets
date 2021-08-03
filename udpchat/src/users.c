@@ -1,5 +1,7 @@
 #include "users.h"
 
+#include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -121,4 +123,38 @@ void user_table_free(struct user_table *table)
 	}
 
 	memset(table, 0, sizeof(*table));
+}
+
+uint16_t user_calculate_id(const struct user *user)
+{
+	uint16_t id = 0;
+
+	if (user->addr_family == AF_INET) {
+		const struct sockaddr_in *sock4 = (void *)&user->addr;
+		/* 4 bytes */
+		uint8_t *ip_buffer = (void *)&sock4->sin_addr.s_addr;
+
+		/* 997 is prime, and very close to 999. */
+		id += ip_buffer[0];
+		id += ip_buffer[1];
+		id %= 997;
+		id += ip_buffer[2];
+		id += ip_buffer[3];
+
+		return id;
+	} else if (user->addr_family == AF_INET6) {
+		const struct sockaddr_in6 *sock6 = (void *)&user->addr;
+		/* 16 bytes */
+		uint8_t *ip_buffer = (void *)sock6->sin6_addr.s6_addr;
+
+		for (size_t n = 0; n < 16; ++n) {
+			id += ip_buffer[n];
+			if (n % 2 == 1)
+				id %= 997;
+		}
+
+		return id;
+	} else {
+		return 0;
+	}
 }

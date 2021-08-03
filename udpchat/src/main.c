@@ -15,43 +15,12 @@
 #include <netinet/in.h>
 #include <netdb.h>
 
+#include "config.h"
+
+#include "util/print.h"
 #include "util/net.h"
 #include "users.h"
-
-/* == Helper macros == */
-#define MAX(_a, _b) ((_a > _b) ? _a : _b)
-#define MIN(_a, _b) ((_a < _b) ? _a : _b)
-
-/* == Compile time options == */
-/* = Logging = */
-/* Controls wether the log* functions print anything. */
-#ifndef PRINT_DEBUG
-#define PRINT_DEBUG (1)
-#endif
-#ifndef PRINT_INFO
-#define PRINT_INFO (1)
-#endif
-#ifndef PRINT_WARN
-#define PRINT_WARN (1)
-#endif
-#ifndef PRINT_ERROR
-#define PRINT_ERROR (1)
-#endif
-#define PRINT_WRITE_MUTEX 1
-#include "util/print.h"
-/* = net = */
-#ifndef MAX_BIND_COUNT
-/* Max count of interfaces to listen on. Normally only two are used. */
-#define MAX_BIND_COUNT (10)
-#endif
-#ifndef MAX_MSG_SIZE
-/* Max size of message that can be received. */
-#define MAX_MSG_SIZE (2048)
-#endif
-#ifndef ACTUSER_TIMEOUT
-/* Timeout before removeing user from active users (in seconds). */
-#define ACTUSER_TIMEOUT (300)
-#endif
+#include "msg_formatter.h"
 
 /* == Globals == */
 static char *progname = "";
@@ -73,9 +42,16 @@ static int msg_handle(int sfd, struct user_table *active_users);
 /* sendall_func is called by user_table_every to send message to other users. */
 static void sendall_func(const struct user *user, void *args0);
 struct sendall_func_args {
-	int sfd;
+	struct user *sender;
 	char *buffer;
 	size_t buffer_len;
+};
+/* timeout_func is called by user_table_update and will be called with timeed-
+ * out users.
+ */
+static void timeout_func(const struct user *user, void *arg0);
+struct timeout_func_args {
+	/* empty */
 };
 
 int main(int argc, char *argv[])
@@ -272,7 +248,7 @@ static void *master_func(void *args0)
 		++poll_arr_len;
 	}
 	for (size_t n = poll_arr_len; n < MAX_BIND_COUNT; ++n) {
-		poll_arr[n].fd = -1; /* poll **will** ignore under 0. */
+		poll_arr[n].fd = -1; /* poll **will** ignore values under 0. */
 		/* Rest of element is 0. */
 	}
 
@@ -295,7 +271,9 @@ static void *master_func(void *args0)
 		/* Check for file descriptors with events. */
 		for (size_t n = 0; n < poll_arr_len; ++n) {
 			int sfd = poll_arr[n].fd;
-			/* Check for POLLIN,POLLPRI,POLLERR and POLLHUP. */
+			/* Check for POLLIN,POLLPRI,POLLERR and POLLHUP.
+			 * The current impl does not support multiple events!
+			 */
 			switch (poll_arr[n].revents) {
 			case POLLIN: /* FALLTHROUGH*/
 			case POLLPRI:
@@ -375,6 +353,7 @@ static int msg_handle(int sfd, struct user_table *active_users)
 		    peeraddr_len);
 		return 1;
 	}
+	user.id = user_calculate_id(&user);
 	user.recv_fd = sfd;
 	user.last_msg = time(NULL);
 	/* Print debug infomation. */
@@ -382,34 +361,68 @@ static int msg_handle(int sfd, struct user_table *active_users)
 	    addr2str(user.addr_family, (void *)&user.addr),
 	    buffer_len);
 
-	ret = user_table_update(active_users, &user, NULL, NULL);
+	ret = user_table_update(active_users, &user, timeout_func, NULL);
 	if (ret != 0) {
 		perror("Failed to update active user table: %s",
 		    strerror(errno));
 		return 1;
 	}
 
+	sendall_args.sender = &user;
 	sendall_args.buffer = buffer;
 	sendall_args.buffer_len = buffer_len;
-	sendall_args.sfd = sfd;
 	user_table_every(active_users, sendall_func, &sendall_args);
 
 	return 0;
 }
 
-static void sendall_func(const struct user *user, void *args0) {
+static void sendall_func(const struct user *user, void *args0)
+{
 	struct sendall_func_args *args = args0;
 	ssize_t bytes = 0;
+	size_t buffer_len = args->buffer_len;
+	const char *send_buffer = NULL;
 
-	bytes = sendto(user->recv_fd, args->buffer, args->buffer_len, 0,
+	if (user->id == args->sender->id) {
+		send_buffer = msg_formatter(args->sender->id, user->id,
+		    args->buffer, &buffer_len);
+	} else {
+		send_buffer = msg_formatter(args->sender->id, user->id, args->buffer,
+		    &buffer_len);
+	}
+
+	bytes = sendto(user->recv_fd, send_buffer, buffer_len, 0,
 	    (void *)&user->addr, user->addr_len);
 	if (bytes < 1) {
-		perror("%d: sendto (%s): %s", args->sfd,
+		perror("%d: sendto (%s): %s", user->recv_fd,
 		    addr2str(user->addr_family, (void *)&user->addr),
 		    strerror(errno));
 		return;
 	}
 	/* Print debugging infomation. */
-	pdebug("%d: sendto (%s): %zd bytes", args->sfd,
+	pdebug("%d: sendto (%s): %zd bytes", user->recv_fd,
+	    addr2str(user->addr_family, (void *)&user->addr), bytes);
+}
+
+static void timeout_func(const struct user *user, void *args0)
+{
+	struct timeout_func_args *args = args0;
+	const char *send_buffer = NULL;
+	size_t send_buffer_len = sizeof(MSG_USR_TIMEOUT_STR);
+	ssize_t bytes = 0;
+
+	(void)args; /* We don't use it yet. */
+	send_buffer = msg_formatter(0, user->id, MSG_USR_TIMEOUT_STR,
+	    &send_buffer_len);
+	bytes = sendto(user->recv_fd, send_buffer, send_buffer_len, 0,
+	    (void *)&user->addr, user->addr_len);
+	if (bytes < 1) {
+		perror("%d: sendto (%s): %s", user->recv_fd,
+		    addr2str(user->addr_family, (void *)&user->addr),
+		    strerror(errno));
+		return;
+	}
+	/* Print debugging infomation. */
+	pdebug("%d: sendto (%s): %zd bytes", user->recv_fd,
 	    addr2str(user->addr_family, (void *)&user->addr), bytes);
 }

@@ -2,6 +2,7 @@
 #define USERS_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <time.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -13,6 +14,7 @@ struct user {
 	socklen_t addr_len; /* Client address lenhgt.*/
 	int addr_family; /* Client address family. */
 	int recv_fd; /* Receive file descriptor. */
+	uint16_t id; /* 16 bit id. */
 
 	/* Throatteling infomation. */
 	time_t last_msg; /* used to kick users. */
@@ -37,5 +39,8 @@ int user_table_update(struct user_table *_table, const struct user *_user,
 int user_table_every(const struct user_table *_table,
     user_table_every_func_t _every_func, void *_every_func_args);
 void user_table_free(struct user_table *_table);
+
+/* Uses addr_family and addr. */
+uint16_t user_calculate_id(const struct user *_user);
 
 #endif

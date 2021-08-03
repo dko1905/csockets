@@ -44,7 +44,7 @@
 #endif
 #if PRINT_WRITE_MUTEX == 1
 #include <pthread.h>
-pthread_mutex_t _print_write_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t _print_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 /* Long print macro definitions */
